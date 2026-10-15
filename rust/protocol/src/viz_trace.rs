@@ -46,6 +46,10 @@ thread_local! {
 }
 
 /// Start a fresh recording on this thread, discarding any previous recording.
+///
+/// The recorder is thread-local: call `start`, the libsignal operation and
+/// `take` on the same thread with no `.await` that could move the task in
+/// between (viz/server drives each call with `now_or_never`).
 pub fn start() {
     RECORDER.with_borrow_mut(|recorder| *recorder = Some(Vec::new()));
 }
