@@ -186,6 +186,7 @@ async fn process_prekey_impl(
     new_session.set_remote_registration_id(message.registration_id());
 
     session_record.promote_state(new_session);
+    viz_record!("session_created");
 
     let pre_keys_used = PreKeysUsed {
         one_time_ec_pre_key_id: message.pre_key_id(),
@@ -287,6 +288,8 @@ pub async fn process_prekey_bundle<R: Rng + CryptoRng>(
     session_store
         .store_session(remote_address, &session_record)
         .await?;
+
+    viz_record!("session_created");
 
     Ok(())
 }

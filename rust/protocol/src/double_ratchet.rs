@@ -219,6 +219,7 @@ impl RatchetState {
                     log::info!(
                         "{remote_address_for_logging} Duplicate message for counter: {counter}"
                     );
+                    viz_record!("duplicate_rejected", index: Some(counter));
                     SignalProtocolError::DuplicatedMessage(chain_index, counter)
                 });
         }
@@ -243,11 +244,15 @@ impl RatchetState {
         // Advance the chain to the target counter, caching skipped keys.
         while chain_key.index() < counter {
             self.store_skipped_key(their_ephemeral, chain_key.message_keys());
+            viz_record!("chain_step", chain: Some("recv"), from: Some(chain_key.index()), to: Some(chain_key.index() + 1), fp: Some(crate::viz_trace::fp(chain_key.next_chain_key().key())));
             chain_key = chain_key.next_chain_key();
         }
 
         // Update the receiver chain to the next key past the one we're returning.
         self.set_receiver_chain_key(their_ephemeral, chain_key.next_chain_key());
+
+        viz_record!("message_key", chain: Some("recv"), index: Some(counter), fp: Some(chain_key.message_keys().viz_fp()));
+        viz_record!("chain_step", chain: Some("recv"), from: Some(counter), to: Some(counter + 1), fp: Some(crate::viz_trace::fp(chain_key.next_chain_key().key())));
 
         Ok(chain_key.message_keys())
     }
@@ -273,6 +278,7 @@ impl RatchetState {
         their_ephemeral: &PublicKey,
         csprng: &mut R,
     ) -> Result<ChainKey> {
+        viz_record!("dh_ratchet", old_fp: self.receiver_chains.last().map(|c| crate::viz_trace::fp(&c.sender_ratchet_key)), fp: Some(crate::viz_trace::fp(&their_ephemeral.serialize())));
         let sender_private_key = self
             .sender_chain
             .as_ref()
@@ -338,12 +344,16 @@ impl RatchetState {
         // and unrecoverable — slightly different from main which preserves it,
         // but the outcome (error) is the same.
         let key_pb = keys.remove(pos);
+        viz_record!("skipped_key_used", index: Some(counter));
+        viz_record!("message_key", chain: Some("recv"), index: Some(counter), fp: Some(crate::viz_trace::fp(if key_pb.seed.is_empty() { &key_pb.cipher_key } else { &key_pb.seed })));
         MessageKeyGenerator::from_pb(key_pb)
             .map(Some)
             .map_err(InvalidSessionError)
     }
 
     fn store_skipped_key(&mut self, their_ephemeral: &PublicKey, key: MessageKeyGenerator) {
+        viz_record!("message_key", chain: Some("recv"), index: Some(match &key { MessageKeyGenerator::Seed((_, index)) => *index, MessageKeyGenerator::Keys(keys) => keys.counter() }), fp: Some(key.viz_fp()));
+        viz_record!("skipped_key_stored", index: Some(match &key { MessageKeyGenerator::Seed((_, index)) => *index, MessageKeyGenerator::Keys(keys) => keys.counter() }));
         let chain_idx = self
             .find_receiver_chain_index(their_ephemeral)
             .expect("store_skipped_key called for non-existent chain");

@@ -1,0 +1,17 @@
+[package]
+name = "libsignal-viz-server"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0.100"
+axum = "0.8.7"
+futures = "0.3.31"
+libsignal-protocol = { path = "../../rust/protocol", features = ["viz-trace"] }
+rand = "0.9.4"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tokio = { version = "1.52.2", features = ["rt-multi-thread", "macros", "process", "sync", "fs", "net", "time", "io-util"] }
+tower-http = { version = "0.6.6", features = ["fs"] }

@@ -139,6 +139,11 @@ pub(crate) struct SessionState {
 }
 
 impl SessionState {
+    #[cfg(feature = "viz-trace")]
+    pub(crate) fn viz_structure(&self) -> &SessionStructure {
+        &self.session
+    }
+
     pub(crate) fn from_session_structure(session: SessionStructure) -> Self {
         Self { session }
     }

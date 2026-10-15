@@ -26,6 +26,14 @@ impl fmt::Debug for MessageKeyGenerator {
 }
 
 impl MessageKeyGenerator {
+    #[cfg(feature = "viz-trace")]
+    pub(crate) fn viz_fp(&self) -> String {
+        crate::viz_trace::fp(match self {
+            Self::Seed((seed, _)) => seed,
+            Self::Keys(keys) => keys.cipher_key(),
+        })
+    }
+
     pub(crate) fn new_from_seed(seed: &[u8], counter: u32) -> Self {
         Self::Seed((seed.to_vec(), counter))
     }
@@ -208,6 +216,7 @@ impl RootKey {
                 .expect("valid output length")
         });
 
+        viz_record!("root_step", old_fp: Some(crate::viz_trace::fp(&self.key)), fp: Some(crate::viz_trace::fp(&root_key)));
         Ok((
             RootKey { key: root_key },
             ChainKey {

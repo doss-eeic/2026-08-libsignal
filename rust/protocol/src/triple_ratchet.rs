@@ -101,7 +101,9 @@ impl OutgoingTripleRatchet {
             )
         })?;
 
-        let message_keys = self.sender_chain_key.message_keys().generate_keys(pqr_key);
+        let message_key_gen = self.sender_chain_key.message_keys();
+        viz_record!("message_key", chain: Some("send"), index: Some(self.sender_chain_key.index()), fp: Some(message_key_gen.viz_fp()));
+        let message_keys = message_key_gen.generate_keys(pqr_key);
 
         let ctext = signal_crypto::aes_256_cbc_encrypt(
             plaintext,
@@ -128,6 +130,7 @@ impl OutgoingTripleRatchet {
             &pqr_msg,
         )?;
 
+        viz_record!("chain_step", chain: Some("send"), from: Some(self.sender_chain_key.index()), to: Some(self.sender_chain_key.index() + 1), fp: Some(crate::viz_trace::fp(self.sender_chain_key.next_chain_key().key())));
         self.sender_chain_key = self.sender_chain_key.next_chain_key();
         self.pqr_state = new_pqr_state;
 

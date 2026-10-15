@@ -22,6 +22,22 @@
 // https://doc.rust-lang.org/rustdoc/what-to-include.html for background.
 // #![warn(missing_docs)]
 
+// Arguments (including fingerprint computation) disappear in ordinary builds.
+macro_rules! viz_record {
+    ($kind:literal $(, $field:ident: $value:expr)* $(,)?) => {
+        #[cfg(feature = "viz-trace")]
+        {
+            crate::viz_trace::record(crate::viz_trace::VizEvent {
+                $($field: $value,)*
+                ..crate::viz_trace::VizEvent::new($kind)
+            });
+        }
+    };
+}
+
+#[cfg(feature = "viz-trace")]
+pub mod viz_trace;
+
 mod consts;
 mod crypto;
 mod double_ratchet;

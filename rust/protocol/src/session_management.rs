@@ -448,6 +448,8 @@ pub(crate) fn try_decrypt_from_record<R: Rng + CryptoRng>(
                             );
                             // Note that we don't propagate `e` here; we always return InvalidMessage,
                             // as we would for a Whisper message that tried several sessions.
+                            #[cfg(feature = "viz-trace")]
+                            crate::viz_trace::record_mac_rejection(&errs);
                             return Err(SignalProtocolError::InvalidMessage(
                                 original_message_type,
                                 "decryption failed".to_owned(),
@@ -548,6 +550,8 @@ pub(crate) fn try_decrypt_from_record<R: Rng + CryptoRng>(
             "{}",
             format_decryption_failure_log(remote_address, &errs, record, ciphertext)?
         );
+        #[cfg(feature = "viz-trace")]
+        crate::viz_trace::record_mac_rejection(&errs);
         Err(SignalProtocolError::InvalidMessage(
             original_message_type,
             "decryption failed".to_owned(),

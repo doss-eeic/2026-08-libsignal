@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Signal 鍵の見える化</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DotGothic16&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+JP:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 class="dot">Signal 鍵の見える化</h1>
+    <p>libsignal の中で鍵がどう変わるかを見る試作。①〜③は手作りのサンプルの再生で、libsignal の実際の出力ではありません。④は手元で動く libsignal の実際の出力です。</p>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="シーン" id="tabs"></div>
+  <h2 class="scene-title dot" id="scene-title"></h2>
+
+  <section id="panel" role="tabpanel" aria-labelledby="scene-title">
+    <div class="pane live-error" id="live-error" role="alert" hidden>
+      <div>サーバーにつながりません。ターミナルで <code>cargo run --manifest-path viz/server/Cargo.toml</code> を実行してから再読み込みしてください。</div>
+      <button type="button" class="btn sec small" id="btn-retry">もう一度つなぐ</button>
+    </div>
+
+    <div class="main" id="panel-main">
+      <div class="pane" id="chat-pane">
+        <p class="pane-label">チャット（使う人に見える画面）</p>
+        <div class="chat-head">
+          <h3 class="chat-title dot" id="chat-title"></h3>
+          <button type="button" class="btn sec small" id="btn-reset" hidden>最初から</button>
+        </div>
+        <p class="live-note" id="live-note" hidden>この画面の右側は、手元で動いている libsignal（Rust）が実際に返した鍵と出来事です。</p>
+        <div class="chat-log" id="chat-log"></div>
+        <p class="live-msg" id="live-msg" role="alert" hidden></p>
+        <div class="composer" id="composer" hidden>
+          <label class="toggle"><input type="checkbox" id="deliver-now" checked><span class="sw" aria-hidden="true"></span><span>すぐ届ける</span></label>
+          <div class="seg" role="radiogroup" aria-label="送る人">
+            <button type="button" role="radio" id="sender-alice" aria-checked="true" class="on"><img src="img/alice.png" alt="" onerror="this.remove()"><span class="dot">Alice</span></button>
+            <button type="button" role="radio" id="sender-bob" aria-checked="false"><img src="img/bob.png" alt="" onerror="this.remove()"><span class="dot">Bob</span></button>
+          </div>
+          <div class="send-row">
+            <input type="text" id="live-text" maxlength="200" placeholder="メッセージを入力" aria-label="メッセージ" autocomplete="off">
+            <button type="button" class="btn" id="btn-send" disabled>送信</button>
+          </div>
+        </div>
+      </div>
+      <div class="pane">
+        <p class="pane-label">裏側（libsignal の中の鍵）</p>
+        <div class="stage-scroll"><div class="stage" id="stage"></div></div>
+        <div class="happen">
+          <h3>このステップで起きたこと</h3>
+          <ol id="happen-list"></ol>
+        </div>
+      </div>
+    </div>
+
+    <div class="test-panel" id="test-panel" hidden>
+      <h3>テストを作る</h3>
+      <p class="hint" id="test-empty">まず左で操作してください</p>
+      <div class="table-wrap" id="script-wrap">
+        <table class="script-table">
+          <thead><tr><th>番号</th><th>操作</th><th>実際の結果</th><th>こうなるはず</th></tr></thead>
+          <tbody id="script-body"></tbody>
+        </table>
+      </div>
+      <div class="test-form" style="margin-top:12px">
+        <label for="test-name">テスト名</label>
+        <input type="text" id="test-name" value="my_scenario" maxlength="40" autocomplete="off" spellcheck="false">
+        <button type="button" class="btn" id="btn-gen" disabled>テストに書き出す</button>
+        <button type="button" class="btn sec" id="btn-run" disabled>実行</button>
+      </div>
+      <p class="field-error" id="name-error" hidden>テスト名は、小文字の英字で始めて、小文字・数字・アンダースコアだけで40文字までにしてください。</p>
+      <p class="hint" id="run-hint" hidden>操作かテスト名が変わりました。もう一度「テストに書き出す」を押してから実行してください。</p>
+      <div id="gen-result" hidden>
+        <h4>書き出したテスト</h4>
+        <div class="code-head"><span>保存先：<span class="mono" id="gen-path"></span></span><button type="button" class="btn sec small" id="btn-copy">コピー</button></div>
+        <div class="code-wrap"><pre class="mono" id="gen-code"></pre></div>
+      </div>
+      <p class="hint" id="run-status" role="status" hidden></p>
+      <div class="run-box" id="run-result" hidden>
+        <p class="run-big" id="run-big"></p>
+        <p class="hint" id="run-info"></p>
+        <details id="run-details"><summary>出力（最後の60行）</summary><div class="code-wrap"><pre class="mono" id="run-tail"></pre></div></details>
+      </div>
+      <h4>いまあるテスト</h4>
+      <ul class="test-list" id="test-list"></ul>
+    </div>
+
+    <div class="caption" id="caption" aria-live="polite">
+      <p class="cap-title" id="cap-title"></p>
+      <p class="cap-text" id="cap-text"></p>
+    </div>
+
+    <div class="controls" id="controls">
+      <button class="btn sec" id="btn-prev" type="button">戻る</button>
+      <span class="counter-step mono" id="step-counter"></span>
+      <button class="btn" id="btn-next" type="button">次へ</button>
+      <div class="dots" id="dots" role="group" aria-label="ステップ"></div>
+    </div>
+
+    <details id="json-details">
+      <summary>このステップのイベント（JSON）</summary>
+      <div class="json-wrap"><pre class="mono" id="json-pre"></pre></div>
+    </details>
+  </section>
+
+  <p class="foot" id="foot">①〜③の表示は手作りのサンプルデータです。キーボードの ← → でも操作できます。④は実際の libsignal の出力です。</p>
+</div>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
