@@ -224,75 +224,98 @@ impl TripleRatchet {
         current_or_previous_for_logging: CurrentOrPrevious,
         csprng: &mut R,
     ) -> Result<Vec<u8>> {
-        // DR: ensure we have a receiver chain, then consume the message key
-        let their_ephemeral = ciphertext.sender_ratchet_key();
-        let counter = ciphertext.counter();
-        let chain_key = self
-            .ratchet
-            .ensure_receiver_chain(their_ephemeral, csprng)?;
-        let message_key_gen = self.ratchet.consume_message_key(
-            their_ephemeral,
-            chain_key,
-            counter,
-            original_message_type,
-            &sender_address.to_string(),
+        let (new_pqr_state, message_keys) = viz_observe!(
+            "key_prepare",
+            "TripleRatchet::decrypt",
+            (|| {
+                // DR: ensure we have a receiver chain, then consume the message key
+                let their_ephemeral = ciphertext.sender_ratchet_key();
+                let counter = ciphertext.counter();
+                let chain_key = self
+                    .ratchet
+                    .ensure_receiver_chain(their_ephemeral, csprng)?;
+                let message_key_gen = self.ratchet.consume_message_key(
+                    their_ephemeral,
+                    chain_key,
+                    counter,
+                    original_message_type,
+                    &sender_address.to_string(),
+                )?;
+
+                // SPQR recv — compute key but don't commit state yet
+                let spqr::Recv {
+                    state: new_pqr_state,
+                    key: pqr_key,
+                } = spqr::recv(&self.pqr_state, ciphertext.pq_ratchet()).map_err(|e| match e {
+                    spqr::Error::StateDecode => SignalProtocolError::InvalidState(
+                        "decrypt",
+                        format!("post-quantum ratchet error: {e}"),
+                    ),
+                    _ => SignalProtocolError::InvalidMessage(
+                        original_message_type,
+                        format!("post-quantum ratchet error: {e}"),
+                    ),
+                })?;
+
+                // Derive final message keys by mixing DR chain key with SPQR key
+                let message_keys = message_key_gen.generate_keys(pqr_key);
+                Ok((new_pqr_state, message_keys))
+            })()
         )?;
-
-        // SPQR recv — compute key but don't commit state yet
-        let spqr::Recv {
-            state: new_pqr_state,
-            key: pqr_key,
-        } = spqr::recv(&self.pqr_state, ciphertext.pq_ratchet()).map_err(|e| match e {
-            spqr::Error::StateDecode => SignalProtocolError::InvalidState(
-                "decrypt",
-                format!("post-quantum ratchet error: {e}"),
-            ),
-            _ => SignalProtocolError::InvalidMessage(
-                original_message_type,
-                format!("post-quantum ratchet error: {e}"),
-            ),
-        })?;
-
-        // Derive final message keys by mixing DR chain key with SPQR key
-        let message_keys = message_key_gen.generate_keys(pqr_key);
 
         // MAC verification
-        let mac_valid = ciphertext.verify_mac_with_addresses(
-            sender_address,
-            recipient_address,
-            &self.remote_identity_key,
-            &self.local_identity_key,
-            message_keys.mac_key(),
+        viz_observe!(
+            "authentication",
+            "TripleRatchet::decrypt",
+            (|| {
+                let mac_valid = ciphertext.verify_mac_with_addresses(
+                    sender_address,
+                    recipient_address,
+                    &self.remote_identity_key,
+                    &self.local_identity_key,
+                    message_keys.mac_key(),
+                )?;
+                if !mac_valid {
+                    return Err(SignalProtocolError::InvalidMessage(
+                        original_message_type,
+                        "MAC verification failed".to_owned(),
+                    ));
+                }
+
+                Ok(())
+            })()
         )?;
-        if !mac_valid {
-            return Err(SignalProtocolError::InvalidMessage(
-                original_message_type,
-                "MAC verification failed".to_owned(),
-            ));
-        }
 
         // AES-CBC decrypt
-        let ptext = match signal_crypto::aes_256_cbc_decrypt(
-            ciphertext.body(),
-            message_keys.cipher_key(),
-            message_keys.iv(),
-        ) {
-            Ok(ptext) => ptext,
-            Err(signal_crypto::DecryptionError::BadKeyOrIv) => {
-                log::warn!(
-                    "{current_or_previous_for_logging} session state corrupt for {sender_address}",
-                );
-                return Err(SignalProtocolError::InvalidSessionStructure(
-                    "invalid receiver chain message keys",
-                ));
-            }
-            Err(signal_crypto::DecryptionError::BadCiphertext(msg)) => {
-                return Err(SignalProtocolError::InvalidMessage(
-                    original_message_type,
-                    format!("failed to decrypt: {msg}"),
-                ));
-            }
-        };
+        let ptext = viz_observe!(
+            "plaintext",
+            "TripleRatchet::decrypt",
+            (|| {
+                let plaintext = match signal_crypto::aes_256_cbc_decrypt(
+                    ciphertext.body(),
+                    message_keys.cipher_key(),
+                    message_keys.iv(),
+                ) {
+                    Ok(ptext) => ptext,
+                    Err(signal_crypto::DecryptionError::BadKeyOrIv) => {
+                        log::warn!(
+                            "{current_or_previous_for_logging} session state corrupt for {sender_address}",
+                        );
+                        return Err(SignalProtocolError::InvalidSessionStructure(
+                            "invalid receiver chain message keys",
+                        ));
+                    }
+                    Err(signal_crypto::DecryptionError::BadCiphertext(msg)) => {
+                        return Err(SignalProtocolError::InvalidMessage(
+                            original_message_type,
+                            format!("failed to decrypt: {msg}"),
+                        ));
+                    }
+                };
+
+                Ok(plaintext)
+            })()
+        )?;
 
         // Commit SPQR state only after all verification passed
         self.pqr_state = new_pqr_state;

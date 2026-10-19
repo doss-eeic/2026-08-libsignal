@@ -204,6 +204,7 @@ function render() {
   $("btn-reset").hidden = !isLive;
   $("live-note").hidden = !isLive;
   $("controls").hidden = isLive;
+  $("receive-diagnosis").hidden = !isLive;
   if (isLive) {
     $("live-error").hidden = true;
     SCENE_ORDER.forEach((id) => {
@@ -386,7 +387,7 @@ function captionOf(a) {
     return [(a.type === "send" ? nm(a.who) + " → " + to + " " : to + " が ") + q + (a.type === "send" ? " を暗号化して届けた" : " を読めた"),
       "受信側の libsignal が同じ鍵を作り、MAC を確かめてから開きました。右の「このステップで起きたこと」が実際の出来事です。"];
   }
-  return [to + " は " + q + " を読めなかった（" + OUT_JA[a.outcome] + "）", "libsignal がエラーを返しました。" + (a.error ? "エラー：" + a.error : "") + " 受信側の状態は変わっていません。"];
+  return [to + " は " + q + " を読めなかった（" + OUT_JA[a.outcome] + "）", "libsignal がエラーを返しました。" + (a.error ? "エラー：" + a.error : "") + " 失敗した段階と保存の結果は「受信の診断」に表示しています。"];
 }
 
 /* ---- 左：チャット ---- */
@@ -490,7 +491,7 @@ function renderLiveStage() {
   if (last) to = last.type === "send" ? (last.delivered_now ? OTHER[last.who] : null) : last.who;
   const bad = !!last && last.outcome !== "ok";
   const notes = {};
-  if (to && bad) notes[to] = "弾かれた（" + (OUT_JA[last.outcome] || last.outcome) + "）。鍵の状態は変わっていない";
+  if (to && bad) notes[to] = "弾かれた（" + (OUT_JA[last.outcome] || last.outcome) + "）。失敗した段階は受信の診断で確認できます";
   renderStage(SCENES.live, {
     state: {
       alice: boxView(ST.alice, PREV && PREV.alice), bob: boxView(ST.bob, PREV && PREV.bob), mallory: []
@@ -546,6 +547,7 @@ function renderLive() {
   $("caption").hidden = down;
   $("json-details").hidden = down;
   $("test-panel").hidden = down || LOAD !== "ready" || !ST;
+  $("receive-diagnosis").hidden = down || LOAD !== "ready" || !ST;
   $("chat-title").textContent = "Alice と Bob";
   $("btn-reset").disabled = LBUSY || LOAD !== "ready";
   if (down) return;
@@ -570,10 +572,13 @@ function renderLive() {
   }
   renderLiveChat();
   renderLiveStage();
+  const diagnosis = diagnosisHtml(ST.last, ST.last ? msgById(ST.last.message_id) : null);
+  $("receive-diagnosis").innerHTML = diagnosis;
+  $("receive-diagnosis").hidden = !diagnosis;
   const cap = captionOf(ST.last);
   $("cap-title").textContent = cap[0];
   $("cap-text").textContent = cap[1];
-  const evs = ST.last ? ST.last.events : [];
+  const evs = ST.last ? ST.last.events.filter((event) => event.kind !== "decrypt_stage") : [];
   $("happen-list").innerHTML = evs.length
     ? evs.map((e) => "<li>" + esc(evText(e, "live")) + '<span class="ev-tag">' + esc(e.kind) + "</span></li>").join("")
     : '<li class="meta">まだ出来事はありません</li>';

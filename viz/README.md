@@ -36,6 +36,9 @@ rust/protocol（本物の libsignal）
 - 記録するのは古典的な Double Ratchet の鍵だけです。v0.105 の送信は `triple_ratchet.rs` を通るので送信側の記録はそこにありますが、耐量子（SPQR）の鍵は記録しません
 - 記録は「今のスレッド」に貯めます（`viz_trace::start` → libsignal の呼び出し → `viz_trace::take`）。この間に `.await` を挟むと記録が混ざるので、サーバーは各呼び出しを `now_or_never` で同期的に実行しています
 - 「Mallory：1バイト書き換えて届ける」は、届ける途中のコピーだけを書き換えます。元のメッセージは待機中のまま残り、あとで普通に届けられます。MAC が合わない受信では libsignal は鍵の状態を変えません
+- ④の「受信の診断」は、形式の読み取り・セッションの準備・認証・本文の復号・保存の結果を、実際の処理の記録から表示します。初回の `PreKey` と通常の `Whisper` の両方に対応しています
+- 現在の候補が失敗して過去の候補が成功した場合は、それぞれの候補と受信全体の結果を分けます。候補内の鍵更新イベントは作業用の状態で行った試行も含み、保存の成功を意味しません
+- 「未実行」は、その経路で失敗した段階より後にある処理です。記録が不足している場合は「記録なし」と表示し、成功や未実行を推測しません
 - API の詳細は `viz/server/src/main.rs` の各ハンドラを参照
 
 | 出来事（kind） | いつ | `fp` が指す鍵 |
@@ -48,6 +51,13 @@ rust/protocol（本物の libsignal）
 | `skipped_key_stored` / `skipped_key_used` | 先に届いたメッセージのために鍵を取り置いた／使った | なし（`index` が番号） |
 | `duplicate_rejected` | 使い済みの番号なので弾いた | なし |
 | `mac_rejected` | MAC が合わず弾いた | なし |
+| `decrypt_stage` | 復号の各段階を開始・完了した | なし（`stage`、`status`、`source`、必要なら`detail`を持つ） |
+
+受信診断の `status` は `started` / `ok` / `error` です。
+候補内の記録には `candidate`（その操作内で0から数える試行番号）と `candidate_kind`（`current` / `previous`）が付きます。
+画面には途中の内部エラーと、最後に呼び出し元へ返ったエラーを分けて表示します。
+認証の段階はMACだけでなくアドレス確認も含むため、「認証の検証（MAC・アドレス）」という名前です。
+相手の信頼確認と保存は、通常メッセージとPreKeyで元の処理順が異なり、画面もそれぞれの経路に合わせています。
 
 ## テストを作る
 
@@ -71,6 +81,7 @@ rust/protocol（本物の libsignal）
 cargo test -p libsignal-protocol                         # 記録なし（元のまま通ること）
 cargo test -p libsignal-protocol --features viz-trace    # 記録あり（tests/viz_trace.rs を含む）
 cargo test --manifest-path viz/server/Cargo.toml         # サーバー
+node viz/web/diagnosis.test.cjs                         # 受信診断の表示判定
 ```
 
 この `viz/` と `viz-trace` は班のフォーク専用です。本家（signalapp/libsignal）への PR には含めません。

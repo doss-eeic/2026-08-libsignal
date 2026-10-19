@@ -25,6 +25,18 @@ pub struct VizEvent {
     pub fp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_fp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_kind: Option<&'static str>,
 }
 
 impl VizEvent {
@@ -37,12 +49,31 @@ impl VizEvent {
             index: None,
             fp: None,
             old_fp: None,
+            stage: None,
+            status: None,
+            source: None,
+            detail: None,
+            candidate: None,
+            candidate_kind: None,
         }
     }
 }
 
+#[derive(Clone, Copy)]
+struct Candidate {
+    id: u32,
+    kind: &'static str,
+}
+
+#[derive(Default)]
+struct Recording {
+    events: Vec<VizEvent>,
+    next_candidate: u32,
+    candidate: Option<Candidate>,
+}
+
 thread_local! {
-    static RECORDER: RefCell<Option<Vec<VizEvent>>> = const { RefCell::new(None) };
+    static RECORDER: RefCell<Option<Recording>> = const { RefCell::new(None) };
 }
 
 /// Start a fresh recording on this thread, discarding any previous recording.
@@ -51,20 +82,78 @@ thread_local! {
 /// `take` on the same thread with no `.await` that could move the task in
 /// between (viz/server drives each call with `now_or_never`).
 pub fn start() {
-    RECORDER.with_borrow_mut(|recorder| *recorder = Some(Vec::new()));
+    RECORDER.with_borrow_mut(|recorder| *recorder = Some(Recording::default()));
 }
 
 /// Stop recording on this thread and return its events.
 pub fn take() -> Vec<VizEvent> {
-    RECORDER.with_borrow_mut(|recorder| recorder.take().unwrap_or_default())
+    RECORDER.with_borrow_mut(|recorder| recorder.take().map(|r| r.events).unwrap_or_default())
 }
 
-pub(crate) fn record(event: VizEvent) {
+pub(crate) fn record(mut event: VizEvent) {
     RECORDER.with_borrow_mut(|recorder| {
-        if let Some(events) = recorder {
-            events.push(event);
+        if let Some(recording) = recorder {
+            if let Some(candidate) = recording.candidate {
+                event.candidate = Some(candidate.id);
+                event.candidate_kind = Some(candidate.kind);
+            }
+            recording.events.push(event);
         }
     });
+}
+
+/// Record the start of a diagnostic stage, including stages in the viz server.
+pub fn stage_started(stage: &'static str, source: &'static str) {
+    let mut event = VizEvent::new("decrypt_stage");
+    event.stage = Some(stage);
+    event.status = Some("started");
+    event.source = Some(source);
+    record(event);
+}
+
+/// Record the original operation's result without replacing its error.
+pub fn stage_finished<T, E: std::fmt::Display>(
+    stage: &'static str,
+    source: &'static str,
+    result: &std::result::Result<T, E>,
+) {
+    let mut event = VizEvent::new("decrypt_stage");
+    event.stage = Some(stage);
+    event.source = Some(source);
+    match result {
+        Ok(_) => event.status = Some("ok"),
+        Err(error) => {
+            event.status = Some("error");
+            event.detail = Some(error.to_string());
+        }
+    }
+    record(event);
+}
+
+// Candidate IDs are local to one start()/take() recording, not message counters.
+pub(crate) struct CandidateGuard {
+    previous: Option<Candidate>,
+}
+
+pub(crate) fn candidate(kind: &'static str) -> Option<CandidateGuard> {
+    RECORDER.with_borrow_mut(|recorder| {
+        let recording = recorder.as_mut()?;
+        let previous = recording.candidate;
+        let id = recording.next_candidate;
+        recording.next_candidate += 1;
+        recording.candidate = Some(Candidate { id, kind });
+        Some(CandidateGuard { previous })
+    })
+}
+
+impl Drop for CandidateGuard {
+    fn drop(&mut self) {
+        RECORDER.with_borrow_mut(|recorder| {
+            if let Some(recording) = recorder {
+                recording.candidate = self.previous;
+            }
+        });
+    }
 }
 
 // A failed trial may be followed by a successful archived session. Call this
