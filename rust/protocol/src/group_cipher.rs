@@ -23,7 +23,10 @@ pub async fn group_encrypt<R: Rng + CryptoRng>(
     let mut record = sender_key_store
         .load_sender_key(sender, distribution_id)
         .await?
-        .ok_or(SignalProtocolError::NoSenderKeyState { distribution_id })?;
+        .ok_or_else(|| {
+            viz_record!("no_sender_key");
+            SignalProtocolError::NoSenderKeyState { distribution_id }
+        })?;
 
     let sender_key_state = record
         .sender_key_state_mut()
@@ -39,6 +42,7 @@ pub async fn group_encrypt<R: Rng + CryptoRng>(
         .ok_or(SignalProtocolError::InvalidSenderKeySession { distribution_id })?;
 
     let message_keys = sender_chain_key.sender_message_key();
+    viz_record!("sender_message_key", index: Some(message_keys.iteration()), fp: Some(message_keys.viz_fp()));
 
     let ciphertext =
         signal_crypto::aes_256_cbc_encrypt(plaintext, message_keys.cipher_key(), message_keys.iv())
@@ -89,6 +93,7 @@ fn get_sender_key(
             log::info!(
                 "SenderKey distribution {distribution_id} Duplicate message for iteration: {iteration}"
             );
+            viz_record!("duplicate_rejected", index: Some(iteration));
             return Err(SignalProtocolError::DuplicatedMessage(
                 current_iteration,
                 iteration,
@@ -134,7 +139,10 @@ pub async fn group_decrypt(
     let mut record = sender_key_store
         .load_sender_key(sender, skm.distribution_id())
         .await?
-        .ok_or(SignalProtocolError::NoSenderKeyState { distribution_id })?;
+        .ok_or_else(|| {
+            viz_record!("no_sender_key");
+            SignalProtocolError::NoSenderKeyState { distribution_id }
+        })?;
 
     let sender_key_state = match record.sender_key_state_for_chain_id(chain_id) {
         Some(state) => state,
@@ -145,6 +153,7 @@ pub async fn group_decrypt(
                 chain_id,
                 record.chain_ids_for_logging().collect::<Vec<_>>(),
             );
+            viz_record!("no_sender_key");
             return Err(SignalProtocolError::NoSenderKeyState { distribution_id });
         }
     };
@@ -159,11 +168,14 @@ pub async fn group_decrypt(
     let signing_key = sender_key_state
         .signing_key_public()
         .map_err(|_| SignalProtocolError::InvalidSenderKeySession { distribution_id })?;
-    if !skm.verify_signature(&signing_key)? {
+    let signature_ok = skm.verify_signature(&signing_key)?;
+    viz_record!("signature_checked", ok: Some(signature_ok));
+    if !signature_ok {
         return Err(SignalProtocolError::SignatureValidationFailed);
     }
 
     let sender_key = get_sender_key(sender_key_state, skm.iteration(), distribution_id)?;
+    viz_record!("sender_message_key", index: Some(sender_key.iteration()), fp: Some(sender_key.viz_fp()));
 
     let plaintext = match signal_crypto::aes_256_cbc_decrypt(
         skm.ciphertext(),
@@ -222,6 +234,7 @@ pub async fn process_sender_key_distribution_message(
     sender_key_store
         .store_sender_key(sender, distribution_id, &sender_key_record)
         .await?;
+    viz_record!("sender_key_received", index: Some(skdm.iteration()?), fp: Some(crate::viz_trace::fp(skdm.chain_key()?)));
     Ok(())
 }
 
@@ -259,6 +272,7 @@ pub async fn create_sender_key_distribution_message<R: Rng + CryptoRng>(
             sender_key_store
                 .store_sender_key(sender, distribution_id, &record)
                 .await?;
+            viz_record!("sender_key_created", index: Some(iteration), fp: Some(crate::viz_trace::fp(&sender_key)));
             record
         }
     };

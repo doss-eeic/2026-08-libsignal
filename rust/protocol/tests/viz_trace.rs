@@ -17,6 +17,176 @@ fn has_stage(events: &[VizEvent], stage: &str, status: &str) -> bool {
         .any(|e| e.kind == "decrypt_stage" && e.stage == Some(stage) && e.status == Some(status))
 }
 
+#[test]
+fn group_creation_distribution_and_normal_message() -> TestResult {
+    async {
+        let mut rng = OsRng.unwrap_err();
+        let sender = ProtocolAddress::new("alice".into(), DeviceId::new(1).unwrap());
+        let id = uuid::Uuid::from_u128(1);
+        let mut a = test_in_memory_protocol_store()?;
+        let mut b = test_in_memory_protocol_store()?;
+        start();
+        let distribution =
+            create_sender_key_distribution_message(&sender, id, &mut a, &mut rng).await?;
+        assert!(take().iter().any(|e| e.kind == "sender_key_created"
+            && e.index == Some(0)
+            && e.fp.as_ref().is_some_and(|fp| fp.len() == 8)));
+        start();
+        process_sender_key_distribution_message(&sender, &distribution, &mut b).await?;
+        assert!(
+            take()
+                .iter()
+                .any(|e| e.kind == "sender_key_received" && e.index == Some(0))
+        );
+        start();
+        let message = group_encrypt(&mut a, &sender, id, b"hello", &mut rng).await?;
+        let sent = take();
+        assert!(
+            sent.iter()
+                .any(|e| e.kind == "sender_chain_step" && e.from == Some(0) && e.to == Some(1))
+        );
+        start();
+        assert_eq!(
+            group_decrypt(message.serialized(), &mut b, &sender).await?,
+            b"hello"
+        );
+        let received = take();
+        assert!(
+            received
+                .iter()
+                .any(|e| e.kind == "sender_chain_step" && e.from == Some(0) && e.to == Some(1))
+        );
+        assert!(
+            received
+                .iter()
+                .any(|e| e.kind == "signature_checked" && e.ok == Some(true))
+        );
+        assert_eq!(
+            sent.iter()
+                .find(|e| e.kind == "sender_message_key")
+                .unwrap()
+                .fp,
+            received
+                .iter()
+                .find(|e| e.kind == "sender_message_key")
+                .unwrap()
+                .fp
+        );
+        Ok(())
+    }
+    .now_or_never()
+    .expect("sync")
+}
+
+#[test]
+fn group_skipped_keys_duplicate_and_signature_failure() -> TestResult {
+    async {
+        let mut rng = OsRng.unwrap_err();
+        let sender = ProtocolAddress::new("alice".into(), DeviceId::new(1).unwrap());
+        let id = uuid::Uuid::from_u128(1);
+        let mut a = test_in_memory_protocol_store()?;
+        let mut b = test_in_memory_protocol_store()?;
+        let distribution =
+            create_sender_key_distribution_message(&sender, id, &mut a, &mut rng).await?;
+        process_sender_key_distribution_message(&sender, &distribution, &mut b).await?;
+        let mut messages = Vec::new();
+        for _ in 0..3 {
+            messages.push(group_encrypt(&mut a, &sender, id, b"hello", &mut rng).await?);
+        }
+        let mut corrupt = messages[2].serialized().to_vec();
+        *corrupt.last_mut().unwrap() ^= 1;
+        let before = b.load_sender_key(&sender, id).await?.unwrap().serialize()?;
+        start();
+        assert!(matches!(
+            group_decrypt(&corrupt, &mut b, &sender).await,
+            Err(SignalProtocolError::SignatureValidationFailed)
+        ));
+        assert!(
+            take()
+                .iter()
+                .any(|e| e.kind == "signature_checked" && e.ok == Some(false))
+        );
+        assert_eq!(
+            before,
+            b.load_sender_key(&sender, id).await?.unwrap().serialize()?
+        );
+        start();
+        group_decrypt(messages[2].serialized(), &mut b, &sender).await?;
+        let events = take();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.kind == "skipped_key_stored")
+                .count(),
+            2
+        );
+        // Keys put aside for iterations 0 and 1 are not "used"; only iteration 2 is.
+        let used: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == "sender_message_key")
+            .map(|e| e.index)
+            .collect();
+        assert_eq!(used, vec![Some(2)]);
+        let record = b.load_sender_key(&sender, id).await?.unwrap();
+        let before_snapshot = record.serialize()?;
+        let boxes = sender_key_boxes(&record);
+        assert_eq!(before_snapshot, record.serialize()?);
+        assert_eq!(boxes[0].index, Some(3));
+        assert_eq!(boxes.len(), 3);
+        assert!(boxes.iter().all(|b| b.fp.len() == 8));
+        start();
+        group_decrypt(messages[0].serialized(), &mut b, &sender).await?;
+        assert!(
+            take()
+                .iter()
+                .any(|e| e.kind == "skipped_key_used" && e.index == Some(0))
+        );
+        start();
+        assert!(matches!(
+            group_decrypt(messages[0].serialized(), &mut b, &sender).await,
+            Err(SignalProtocolError::DuplicatedMessage(..))
+        ));
+        assert!(
+            take()
+                .iter()
+                .any(|e| e.kind == "duplicate_rejected" && e.index == Some(0))
+        );
+        Ok(())
+    }
+    .now_or_never()
+    .expect("sync")
+}
+
+#[test]
+fn group_late_joiner_cannot_read_older_message() -> TestResult {
+    async {
+        let mut rng = OsRng.unwrap_err();
+        let sender = ProtocolAddress::new("alice".into(), DeviceId::new(1).unwrap());
+        let id = uuid::Uuid::from_u128(1);
+        let mut a = test_in_memory_protocol_store()?;
+        let mut c = test_in_memory_protocol_store()?;
+        create_sender_key_distribution_message(&sender, id, &mut a, &mut rng).await?;
+        let old = group_encrypt(&mut a, &sender, id, b"old", &mut rng).await?;
+        start();
+        assert!(matches!(
+            group_decrypt(old.serialized(), &mut c, &sender).await,
+            Err(SignalProtocolError::NoSenderKeyState { .. })
+        ));
+        assert!(take().iter().any(|e| e.kind == "no_sender_key"));
+        let current = create_sender_key_distribution_message(&sender, id, &mut a, &mut rng).await?;
+        process_sender_key_distribution_message(&sender, &current, &mut c).await?;
+        start();
+        assert!(matches!(
+            group_decrypt(old.serialized(), &mut c, &sender).await,
+            Err(SignalProtocolError::DuplicatedMessage(..))
+        ));
+        assert!(take().iter().any(|e| e.kind == "duplicate_rejected"));
+        Ok(())
+    }
+    .now_or_never()
+    .expect("sync")
+}
+
 async fn setup() -> Result<
     (
         InMemSignalProtocolStore,

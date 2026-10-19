@@ -354,3 +354,24 @@ summary { cursor: pointer; min-height: 32px; display: flex; align-items: center;
 .run-big.bad { color: var(--bad); }
 .run-box details { margin-top: 8px; }
 .test-list { margin: 0; padding-left: 20px; font-size: 14px; }
+
+/* ---- ⑤ グループ ---- */
+.gctl { display: flex; flex-direction: column; gap: 8px; margin: 0 0 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.gmembers { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.gmember { display: inline-flex; align-items: center; gap: 6px; }
+.gjoins { display: flex; flex-wrap: wrap; gap: 6px; }
+.gsend { display: flex; flex-wrap: wrap; gap: 8px; }
+.gsend select, .gsend input {
+  font: inherit; color: var(--fg); background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; min-height: 44px; min-width: 0;
+}
+.gsend select { flex: none; }
+.gsend input { flex: 1 1 140px; }
+.gsend select:focus-visible, .gsend input:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+.gsend .btn { min-width: 72px; padding: 8px 16px; }
+.gtools { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.gctl.busy { opacity: 0.7; }
+.chip.faint { border-style: dashed; opacity: 0.8; }
+.sys-note { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.abtn:disabled { opacity: 0.4; cursor: not-allowed; }
+.stage.g { grid-template-columns: var(--cols, repeat(2, minmax(0, 1fr))); }
