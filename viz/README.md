@@ -48,6 +48,20 @@ rust/protocol（本物の libsignal）
 | `skipped_key_stored` / `skipped_key_used` | 先に届いたメッセージのために鍵を取り置いた／使った | なし（`index` が番号） |
 | `duplicate_rejected` | 使い済みの番号なので弾いた | なし |
 | `mac_rejected` | MAC が合わず弾いた | なし |
+| `sender_key_created` / `sender_key_received` | 自分の Sender Key を作った／配布された Sender Key を保存した | 鎖の鍵の種（`index` は現在の番号） |
+| `sender_key_distributed` | サーバーが Sender Key を参加者へ配布した（`to` が配布先） | 配布した鎖の鍵の種 |
+| `sender_chain_step` | Sender Key の鎖が `from` → `to_index` に進んだ | 進んだ後の鎖の鍵 |
+| `sender_message_key` | このメッセージの鍵を使った（送る側は暗号化、受け取る側は復号に。取り置きを作るだけのときは出ない） | メッセージ鍵の種 |
+| `signature_checked` | グループメッセージの署名を確認した（`ok` が結果） | なし |
+| `no_sender_key` | 送信者の Sender Key がないため弾いた | なし |
+
+## ⑤ グループ（Sender Keys）
+
+Alice と Bob から始め、Carol と Dave が後から参加できます。`/api/group/` で、本物の libsignal の Sender Keys による配布・送信・配達・改ざん・再送を操作します。参加者ごとに、各送信者の鎖の現在位置と、順序が逆に届いたときの取り置きの鍵を指紋で確認できます。`skipped_key_stored`、`skipped_key_used`、`duplicate_rejected` はグループでも同じ意味です。
+
+Sender Key の配布メッセージはストア間で直接渡します。実際の Signal が使う1対1の暗号化メッセージによる配送は省略しています。参加だけでは鍵を配布せず、次の送信時に未配布の参加者へ現在の鍵を渡します。配布前の古いメッセージは `no_sender_key`、現在の鍵を受け取った後も古い番号は `duplicate` となり読めません。署名に失敗したコピーは `bad_signature` となり、元のメッセージは後で正常に配達できます。
+
+グループの「テストを作る」も公開 API だけの Rust テストを生成し、既存の `/api/test/run` で実行します。
 
 ## テストを作る
 

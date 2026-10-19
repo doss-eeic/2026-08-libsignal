@@ -7,7 +7,7 @@ use crate::sim::{Action, ActionType, Expect, Who};
 
 /// Renders a self-contained protocol integration test from the actions recorded by the UI.
 pub(crate) fn generate(name: &str, actions: &[Action]) -> Result<String> {
-    if !valid_name(name) {
+    if !crate::valid_name(name) {
         return Err(anyhow!("テスト名が正しくありません"));
     }
 
@@ -261,16 +261,6 @@ fn emit_delivery(
         )),
     }
     Ok(())
-}
-
-fn valid_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= 40
-        && bytes[0].is_ascii_lowercase()
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
 fn who_name(who: Who) -> &'static str {

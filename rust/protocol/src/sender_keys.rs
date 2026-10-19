@@ -44,6 +44,11 @@ impl SenderMessageKey {
         }
     }
 
+    #[cfg(feature = "viz-trace")]
+    pub(crate) fn viz_fp(&self) -> String {
+        crate::viz_trace::fp(&self.seed)
+    }
+
     pub(crate) fn from_protobuf(
         smk: storage_proto::sender_key_state_structure::SenderMessageKey,
     ) -> Self {
@@ -105,10 +110,9 @@ impl SenderChainKey {
             )
         })?;
 
-        Ok(SenderChainKey::new(
-            new_iteration,
-            self.get_derivative(Self::CHAIN_KEY_SEED),
-        ))
+        let next = SenderChainKey::new(new_iteration, self.get_derivative(Self::CHAIN_KEY_SEED));
+        viz_record!("sender_chain_step", from: Some(self.iteration), to: Some(new_iteration), fp: Some(crate::viz_trace::fp(next.seed())));
+        Ok(next)
     }
 
     pub(crate) fn sender_message_key(&self) -> SenderMessageKey {
@@ -216,6 +220,7 @@ impl SenderKeyState {
         self.state
             .sender_message_keys
             .push(sender_message_key.as_protobuf());
+        viz_record!("skipped_key_stored", index: Some(sender_message_key.iteration()));
         while self.state.sender_message_keys.len() > consts::MAX_MESSAGE_KEYS {
             self.state.sender_message_keys.remove(0);
         }
@@ -229,6 +234,7 @@ impl SenderKeyState {
             .position(|x| x.iteration == iteration)
         {
             let smk = self.state.sender_message_keys.remove(index);
+            viz_record!("skipped_key_used", index: Some(iteration));
             Some(SenderMessageKey::from_protobuf(smk))
         } else {
             None

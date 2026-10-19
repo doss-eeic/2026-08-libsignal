@@ -25,6 +25,8 @@ pub struct VizEvent {
     pub fp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_fp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
 }
 
 impl VizEvent {
@@ -37,6 +39,7 @@ impl VizEvent {
             index: None,
             fp: None,
             old_fp: None,
+            ok: None,
         }
     }
 }
@@ -145,6 +148,33 @@ pub fn session_boxes(record: &SessionRecord) -> Vec<KeyBoxView> {
                 index: None,
             });
         }
+    }
+    boxes
+}
+
+/// Snapshot the current Sender Key chain and stored message keys without mutation.
+/// The server supplies participant-specific labels and sender identifiers.
+pub fn sender_key_boxes(record: &crate::SenderKeyRecord) -> Vec<KeyBoxView> {
+    let Ok(state) = record.sender_key_state() else {
+        return Vec::new();
+    };
+    let state = state.as_protobuf();
+    let mut boxes = Vec::new();
+    if let Some(chain) = state.sender_chain_key {
+        boxes.push(KeyBoxView {
+            id: "sk".into(),
+            label: "Sender Key".into(),
+            fp: fp(&chain.seed),
+            index: Some(chain.iteration),
+        });
+    }
+    for key in state.sender_message_keys {
+        boxes.push(KeyBoxView {
+            id: format!("skipped:{}", key.iteration),
+            label: format!("取り置きの鍵 #{}", key.iteration),
+            fp: fp(&key.seed),
+            index: None,
+        });
     }
     boxes
 }

@@ -11,7 +11,7 @@
 <div class="wrap">
   <header>
     <h1 class="dot">Signal 鍵の見える化</h1>
-    <p>libsignal の中で鍵がどう変わるかを見る試作。①〜③は手作りのサンプルの再生で、libsignal の実際の出力ではありません。④は手元で動く libsignal の実際の出力です。</p>
+    <p>libsignal の中で鍵がどう変わるかを見る試作。①〜③は手作りのサンプルの再生で、libsignal の実際の出力ではありません。④⑤は手元で動く libsignal の実際の出力です。</p>
   </header>
 
   <div class="tabs" role="tablist" aria-label="シーン" id="tabs"></div>
@@ -31,6 +31,19 @@
           <button type="button" class="btn sec small" id="btn-reset" hidden>最初から</button>
         </div>
         <p class="live-note" id="live-note" hidden>この画面の右側は、手元で動いている libsignal（Rust）が実際に返した鍵と出来事です。</p>
+        <div class="gctl" id="gctl" hidden>
+          <div class="gmembers" id="g-members" aria-label="いまのメンバー"></div>
+          <div class="gjoins" id="g-joins"></div>
+          <div class="gsend">
+            <select id="g-from" aria-label="送る人"></select>
+            <input type="text" id="g-text" maxlength="200" placeholder="メッセージ" aria-label="メッセージ" autocomplete="off">
+            <button type="button" class="btn" id="g-send" disabled>送信</button>
+          </div>
+          <div class="gtools">
+            <label class="toggle"><input type="checkbox" id="g-deliver" checked><span class="sw" aria-hidden="true"></span><span>すぐ届ける</span></label>
+            <button type="button" class="btn sec small" id="g-reset">最初から</button>
+          </div>
+        </div>
         <div class="chat-log" id="chat-log"></div>
         <p class="live-msg" id="live-msg" role="alert" hidden></p>
         <div class="composer" id="composer" hidden>
@@ -105,7 +118,7 @@
     </details>
   </section>
 
-  <p class="foot" id="foot">①〜③の表示は手作りのサンプルデータです。キーボードの ← → でも操作できます。④は実際の libsignal の出力です。</p>
+  <p class="foot" id="foot">①〜③の表示は手作りのサンプルデータです。キーボードの ← → でも操作できます。④⑤は実際の libsignal の出力です。</p>
 </div>
 <script src="data.js"></script>
 <script src="app.js"></script>

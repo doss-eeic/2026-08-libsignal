@@ -59,7 +59,7 @@ impl Drop for RunGuard {
 }
 
 async fn run_inner(name: &str) -> Result<RunResult> {
-    if !valid_name(name) {
+    if !crate::valid_name(name) {
         return Err(anyhow!("テスト名が正しくありません"));
     }
 
@@ -150,13 +150,6 @@ pub(crate) fn repo_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
 }
 
-fn valid_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some('a'..='z'))
-        && name.len() <= 40
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-}
-
 fn push_line(tail: &Mutex<VecDeque<String>>, line: String) {
     let mut tail = tail.lock().expect("tail lock");
     if tail.len() == 60 {
@@ -187,9 +180,9 @@ mod tests {
 
     #[test]
     fn validates_names() {
-        assert!(valid_name("demo_2"));
-        assert!(!valid_name("Demo"));
-        assert!(!valid_name("1demo"));
+        assert!(crate::valid_name("demo_2"));
+        assert!(!crate::valid_name("Demo"));
+        assert!(!crate::valid_name("1demo"));
     }
 
     #[cfg(unix)]

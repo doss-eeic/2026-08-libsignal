@@ -10,7 +10,7 @@ const CHARS = {
   mallory: { name: "Mallory", initial: "M", role: "通信路の攻撃者" }
 };
 const REASONS = { duplicate: "重複", bad_mac: "MAC不一致", bad_signature: "署名不一致" };
-const SCENE_ORDER = ["one-to-one", "group", "attacks", "live"];
+const SCENE_ORDER = ["one-to-one", "group", "attacks", "live", "glive"];
 
 let sceneId = "one-to-one";
 let stepIdx = 0;
@@ -199,11 +199,13 @@ function renderHappen(step, sceneKey) {
 
 function render() {
   const scene = SCENES[sceneId];
-  const isLive = sceneId === "live";
-  $("composer").hidden = !isLive;
-  $("btn-reset").hidden = !isLive;
+  const isLive = sceneId === "live" || sceneId === "glive";
+  $("composer").hidden = sceneId !== "live";
+  $("btn-reset").hidden = sceneId !== "live";
+  $("gctl").hidden = sceneId !== "glive";
   $("live-note").hidden = !isLive;
   $("controls").hidden = isLive;
+  $("stage").classList.toggle("g", sceneId === "glive");
   if (isLive) {
     $("live-error").hidden = true;
     SCENE_ORDER.forEach((id) => {
@@ -212,7 +214,7 @@ function render() {
       b.tabIndex = id === sceneId ? 0 : -1;
     });
     $("scene-title").textContent = scene.title;
-    renderLive();
+    renderAny();
     return;
   }
   $("live-error").hidden = true;
@@ -265,11 +267,14 @@ function go(i) {
 function setScene(id) {
   sceneId = id;
   stepIdx = 0;
+  $("run-result").hidden = true;
   render();
   if (id === "live") enterLive();
+  if (id === "glive") enterGroup();
 }
 
 /* ================= ④ libsignal で送る（手元の Rust サーバーが返した実際の鍵と出来事を表示） ================= */
+SCENES.glive = { tab: "⑤ libsignal でグループ", title: "人を増やしながら、本物の libsignal のグループ暗号（Sender Keys）を動かす", cast: [], steps: [] };
 SCENES.live = { tab: "④ libsignal で送る", title: "自分で送って、本物の libsignal の鍵の動きを見る", cast: ["alice", "mallory", "bob"], steps: [] };
 
 let ST = null;          // 最新の State（サーバーが返したもの）
@@ -331,6 +336,7 @@ async function enterLive() {
   }
   if (sceneId === "live") renderLive();
 }
+function renderAny() { if (sceneId === "glive") renderGroup(); else renderLive(); }
 async function loadTests() {
   try { TESTS = (await api("GET", "/api/tests")).tests || []; } catch (e) { /* 一覧が取れなくても続ける */ }
 }
@@ -338,12 +344,12 @@ async function runLive(fn) {
   if (LBUSY || LOAD !== "ready") return;
   LBUSY = true;
   LMSG = "";
-  renderLive();
+  renderAny();
   try { await fn(); } catch (e) {
     if (e.down) LOAD = "down"; else LMSG = e.message;
   }
   LBUSY = false;
-  renderLive();
+  renderAny();
 }
 
 /* ---- 文章 ---- */
@@ -502,37 +508,56 @@ function renderLiveStage() {
 }
 
 /* ---- 下：テストを作る ---- */
+const LT = {
+  base: "/api",
+  ready: () => !!ST,
+  script: () => ST.script,
+  describe: (a) => describe(a),
+  hasDelivery: (a) => hasDelivery(a),
+  mismatch: (a) => mismatch(a),
+  out: OUT_JA,
+  options: [["ok", "読める（ok）"], ["duplicate", "重複で弾かれる（duplicate）"], ["bad_mac", "MAC不一致で弾かれる（bad_mac）"], ["any_error", "何かのエラー（any_error）"]],
+  gen: () => GEN,
+  setGen: (g) => { GEN = g; },
+  setState: (n, k) => setState(n, k)
+};
+function curT() { return sceneId === "glive" ? GT : LT; }
 function renderTestPanel() {
-  const script = ST.script;
+  const T = curT();
+  const script = T.script();
   const empty = script.length === 0;
   $("test-empty").hidden = !empty;
   $("script-wrap").hidden = empty;
   let rows = "";
   script.forEach((a) => {
-    const sel = hasDelivery(a);
-    const mm = mismatch(a);
+    const sel = T.hasDelivery(a);
+    const mm = T.mismatch(a);
     let res = "—", exp = "—";
+    if (!sel && T.okOnly) {
+      exp = '<select id="expect-' + a.i + '" aria-label="こうなるはず（' + (a.i + 1) + '番）" disabled><option>' + T.out.ok + "</option></select>";
+    }
     if (sel) {
-      res = '<span class="chip ' + (a.outcome === "ok" ? "ok" : "bad") + '" title="' + esc(a.error || "") + '">' + OUT_JA[a.outcome] + "</span>";
+      res = '<span class="chip ' + (a.outcome === "ok" ? "ok" : "bad") + '" title="' + esc(a.error || "") + '">' + (T.out[a.outcome] || esc(a.outcome)) + "</span>";
       exp = '<select id="expect-' + a.i + '" data-i="' + a.i + '" aria-label="こうなるはず（' + (a.i + 1) + '番）"' + (LBUSY ? " disabled" : "") + ">" +
-        [["ok", "読める（ok）"], ["duplicate", "重複で弾かれる（duplicate）"], ["bad_mac", "MAC不一致で弾かれる（bad_mac）"], ["any_error", "何かのエラー（any_error）"]]
+        T.options
           .map((o) => '<option value="' + o[0] + '"' + (a.expect === o[0] ? " selected" : "") + ">" + o[1] + "</option>").join("") + "</select>" +
         (mm ? '<div class="warn">このままだとテストは失敗します</div>' : "");
     }
-    rows += '<tr class="' + (mm ? "mismatch" : "") + '"><td class="mono">' + (a.i + 1) + "</td><td>" + esc(describe(a)) + "</td><td>" + res + "</td><td>" + exp + "</td></tr>";
+    rows += '<tr class="' + (mm ? "mismatch" : "") + '"><td class="mono">' + (a.i + 1) + "</td><td>" + esc(T.describe(a)) + "</td><td>" + res + "</td><td>" + exp + "</td></tr>";
   });
   $("script-body").innerHTML = rows;
   const name = $("test-name").value;
   const valid = NAME_RE.test(name);
   $("name-error").hidden = valid;
   $("btn-gen").disabled = empty || !valid || RUNNING || LBUSY;
-  const canRun = !!GEN && !GEN.stale && GEN.name === name && valid && !RUNNING && !empty;
+  const G = T.gen();
+  const canRun = !!G && !G.stale && G.name === name && valid && !RUNNING && !empty;
   $("btn-run").disabled = !canRun;
-  $("run-hint").hidden = !(GEN && (GEN.stale || GEN.name !== name)) || empty;
-  $("gen-result").hidden = !GEN;
-  if (GEN) {
-    $("gen-path").textContent = GEN.path;
-    $("gen-code").textContent = GEN.code;
+  $("run-hint").hidden = !(G && (G.stale || G.name !== name)) || empty;
+  $("gen-result").hidden = !G;
+  if (G) {
+    $("gen-path").textContent = G.path;
+    $("gen-code").textContent = G.code;
   }
   $("test-list").innerHTML = TESTS.length
     ? TESTS.map((t) => "<li><span class=\"mono\">" + esc(t.name) + '</span> <span class="meta mono">' + esc(t.path) + "</span></li>").join("")
@@ -598,11 +623,12 @@ function initLive() {
   $("live-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); send(); }
   });
+  initGroup();
   $("btn-reset").addEventListener("click", () => runLive(async () => {
     const st = await api("POST", "/api/reset");
     ST = st; PREV = null; GEN = null;
   }));
-  $("btn-retry").addEventListener("click", () => enterLive());
+  $("btn-retry").addEventListener("click", () => (sceneId === "glive" ? enterGroup() : enterLive()));
   $("chat-log").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-act]");
     if (!b || sceneId !== "live") return;
@@ -612,19 +638,21 @@ function initLive() {
   $("script-body").addEventListener("change", (e) => {
     const s = e.target.closest("select[data-i]");
     if (!s) return;
-    runLive(async () => { setState(await api("PUT", "/api/script/" + s.dataset.i + "/expect", { expect: s.value }), true); });
+    const T = curT();
+    runLive(async () => { T.setState(await api("PUT", T.base + "/script/" + s.dataset.i + "/expect", { expect: s.value }), true); });
   });
-  $("test-name").addEventListener("input", () => { if (ST) renderTestPanel(); });
+  $("test-name").addEventListener("input", () => { if (curT().ready()) renderTestPanel(); });
   $("btn-gen").addEventListener("click", () => runLive(async () => {
     const name = $("test-name").value;
-    const r = await api("POST", "/api/test/generate", { name });
-    GEN = { name: r.name, path: r.path, code: r.code, stale: false };
+    const T = curT();
+    const r = await api("POST", T.base + "/test/generate", { name });
+    T.setGen({ name: r.name, path: r.path, code: r.code, stale: false });
     $("run-result").hidden = true;
     await loadTests();
   }));
   $("btn-copy").addEventListener("click", async () => {
     const btn = $("btn-copy");
-    try { await navigator.clipboard.writeText(GEN.code); btn.textContent = "コピーしました"; }
+    try { await navigator.clipboard.writeText(curT().gen().code); btn.textContent = "コピーしました"; }
     catch (e) {
       const r = document.createRange();
       r.selectNodeContents($("gen-code"));
@@ -634,8 +662,8 @@ function initLive() {
     setTimeout(() => { btn.textContent = "コピー"; }, 2000);
   });
   $("btn-run").addEventListener("click", async () => {
-    if (RUNNING || !GEN) return;
-    const name = GEN.name;
+    if (RUNNING || !curT().gen()) return;
+    const name = curT().gen().name;
     RUNNING = true;
     const t0 = Date.now();
     $("run-result").hidden = true;
@@ -667,6 +695,298 @@ function initLive() {
   });
 }
 
+/* ================= ⑤ libsignal でグループ（Sender Keys） ================= */
+let GST = null;         // グループの最新 State
+let GPREV = null;       // ひとつ前の State
+let GGEN = null;
+let G_FROM = "alice";
+let G_DELIVER = true;
+const GOUT_JA = { ok: "読めた", duplicate: "使い済みの番号", bad_signature: "署名不一致", no_sender_key: "Sender Key を持っていない", error: "エラー" };
+
+function gSetState(next, keepPrev) {
+  if (!keepPrev) GPREV = GST;
+  GST = next;
+  if (GGEN) GGEN.stale = true;
+}
+async function enterGroup() {
+  LOAD = "loading";
+  LMSG = "";
+  renderGroup();
+  try {
+    const st = await api("GET", "/api/group/state");
+    GST = st; GPREV = null; GGEN = null;
+    LOAD = "ready";
+    await loadTests();
+  } catch (e) {
+    if (LOAD !== "ready") LOAD = "down";
+  }
+  if (sceneId === "glive") renderGroup();
+}
+
+function gMsg(id) { return GST.messages.find((m) => m.id === id); }
+function gOutChip(who, outcome, verb) {
+  if (outcome === "ok") return '<span class="chip ok">&#10003; ' + nm(who) + " 読めた</span>";
+  return '<span class="chip bad">' + nm(who) + " " + (verb || "弾いた") + "：" + esc(GOUT_JA[outcome] || outcome) + "</span>";
+}
+const gNames = (list) => (list || []).map(nm).join("・");
+
+function gDescribe(a) {
+  switch (a.type) {
+    case "join": return nm(a.who) + " が参加";
+    case "send": return nm(a.who) + " が送信 #" + a.message_id;
+    case "deliver": return "#" + a.message_id + " を " + nm(a.who) + " に届けた";
+    case "tamper": return "#" + a.message_id + " を書き換えて " + nm(a.who) + " に";
+    default: return "#" + a.message_id + " を " + nm(a.who) + " に再送";
+  }
+}
+function gHasDelivery(a) { return a.type === "deliver" || a.type === "tamper" || a.type === "replay"; }
+function gMismatch(a) {
+  if (!gHasDelivery(a)) return false;
+  if (a.expect === "any_error") return a.outcome === "ok";
+  return a.expect !== a.outcome;
+}
+const GT = {
+  base: "/api/group",
+  ready: () => !!GST,
+  script: () => GST.script,
+  describe: gDescribe,
+  hasDelivery: gHasDelivery,
+  mismatch: gMismatch,
+  okOnly: true,
+  out: GOUT_JA,
+  options: [["ok", "読めた"], ["duplicate", "使い済みの番号"], ["bad_signature", "署名不一致"], ["no_sender_key", "Sender Key を持っていない"], ["error", "エラー"], ["any_error", "何かのエラー（any_error）"]],
+  gen: () => GGEN,
+  setGen: (g) => { GGEN = g; },
+  setState: gSetState
+};
+
+/* ---- 左：操作 ---- */
+function renderGroupControls(ready) {
+  const members = ready ? GST.members : ["alice", "bob"];
+  $("g-members").innerHTML = members.map((m) =>
+    '<span class="gmember">' + portraitHtml(m, "p32") + '<span class="dot">' + nm(m) + "</span></span>").join("");
+  const joins = ready ? GST.can_join : [];
+  $("g-joins").hidden = !joins.length;
+  $("g-joins").innerHTML = joins.map((m) =>
+    '<button type="button" class="btn sec small" id="join-' + m + '" data-gjoin="' + m + '"' + (LBUSY || !ready ? " disabled" : "") + ">＋ " + nm(m) + " を追加</button>").join("");
+  if (members.indexOf(G_FROM) < 0) G_FROM = "alice";
+  const sel = $("g-from");
+  const want = members.join(",");
+  if (sel.dataset.members !== want) {
+    sel.innerHTML = members.map((m) => '<option value="' + m + '">' + nm(m) + "</option>").join("");
+    sel.dataset.members = want;
+  }
+  sel.value = G_FROM;
+  $("gctl").classList.toggle("busy", LBUSY || !ready);
+  ["g-from", "g-text", "g-deliver", "g-reset"].forEach((id) => { $(id).disabled = LBUSY || !ready; });
+  $("g-send").disabled = !ready || LBUSY || $("g-text").value.trim() === "";
+}
+
+/* ---- 左：チャット ---- */
+function renderGroupChat() {
+  const log = $("chat-log");
+  const last = GST.last;
+  let h = '<div class="sys' + (!last ? " cur" : "") + '" data-cur="' + (!last ? 1 : 0) + '">Alice と Bob のグループ。まだ誰も Sender Key を作っていない</div>';
+  const dis = LBUSY ? " disabled" : "";
+  GST.script.forEach((a) => {
+    if (a.type === "deliver") return;
+    const isLast = !!last && last.i === a.i;
+    const m = a.message_id !== undefined ? gMsg(a.message_id) : null;
+    if (a.type === "join") {
+      h += '<div class="sys' + (isLast ? " cur" : "") + '" data-cur="' + (isLast ? 1 : 0) + '">' + esc(nm(a.who) + " がグループに参加した（参加前のメッセージは届いていない）") + "</div>";
+    } else if (a.type === "send") {
+      if (!m) return;
+      const bubbleCur = !!last && last.message_id === a.message_id && (last.type === "send" || last.type === "deliver");
+      // 送ったばかりの一連の操作（送信 + すぐ届ける）の間だけ、配布の行も強調する
+      const fresh = bubbleCur && GST.script.every((x) => x.i <= a.i || x.i > last.i || (x.type === "deliver" && x.message_id === a.message_id));
+      if (a.distributed_to && a.distributed_to.length) {
+        const ev = (a.events || []).find((e) => e.kind === "sender_key_distributed");
+        const n = ev && ev.index !== undefined ? ev.index : m.iteration;
+        h += '<div class="sys' + (fresh ? " cur" : "") + '" data-cur="' + (fresh ? 1 : 0) + '">' +
+          esc(nm(a.who) + " が " + gNames(a.distributed_to) + " に自分の Sender Key（iteration " + n + "）を配った") +
+          '<div class="sys-note">本物の Signal では、これを1対1の暗号で包んで送る（ここでは省略）</div></div>';
+      }
+      let chips = "";
+      m.deliveries.forEach((d) => {
+        if (d.status === "delivered") chips += '<span class="chip ok">&#10003; ' + nm(d.to) + " 読めた</span>";
+        else if (d.status === "waiting") chips += '<span class="chip pend">' + nm(d.to) + " 通信路で待機中</span>";
+        else chips += '<span class="chip pend faint">' + nm(d.to) + " 参加前なので届いていない</span>";
+      });
+      GST.script.filter((x) => x.message_id === m.id && gHasDelivery(x) && x.outcome !== "ok")
+        .forEach((x) => { chips += gOutChip(x.who, x.outcome); });
+      let acts = "";
+      m.deliveries.forEach((d) => {
+        const n = nm(d.to), key = m.id + "-" + d.to;
+        const attr = ' data-id="' + m.id + '" data-to="' + d.to + '"' + dis;
+        if (d.status === "waiting") {
+          acts += '<button type="button" class="abtn" id="g-deliver-' + key + '" data-gact="deliver"' + attr + ">" + n + " に届ける</button>" +
+            '<button type="button" class="abtn mal" id="g-tamper-' + key + '" data-gact="tamper"' + attr + ">Mallory：書き換えて " + n + " に届ける</button>";
+        } else if (d.status === "not_addressed") {
+          acts += '<button type="button" class="abtn" id="g-deliver-' + key + '" data-gact="deliver"' + attr + ">" + n + " に届けてみる</button>";
+        } else if (d.status === "delivered") {
+          acts += '<button type="button" class="abtn mal" id="g-replay-' + key + '" data-gact="replay"' + attr + ">Mallory：" + n + " にもう一度送る</button>";
+        }
+      });
+      h += '<div class="chat-item' + (bubbleCur ? " cur" : "") + '" data-cur="' + (bubbleCur ? 1 : 0) + '">' + portraitHtml(m.from, "p32") +
+        '<div class="chat-main"><div class="chat-name"><span class="dot">' + nm(m.from) + '</span><span class="meta mono">#' + m.id + "</span></div>" +
+        '<div class="bubble">' + esc(m.text) + "</div>" +
+        '<div class="meta mono">iteration ' + m.iteration + " · 暗号文 " + esc(m.ciphertext_hex.slice(0, 6)) + "…（" + m.ciphertext_len + " バイト）</div>" +
+        '<div class="chips">' + chips + "</div>" +
+        (acts ? '<div class="acts">' + acts + "</div>" : "") + "</div></div>";
+    } else {
+      const text = a.type === "tamper"
+        ? "#" + a.message_id + " の暗号文を1か所書き換えて " + nm(a.who) + " に届けた"
+        : "#" + a.message_id + " を " + nm(a.who) + " にもう一度送った";
+      h += '<div class="chat-item mal' + (isLast ? " cur" : "") + '" data-cur="' + (isLast ? 1 : 0) + '">' + portraitHtml("mallory", "p32") +
+        '<div class="chat-main"><div class="chat-name"><span class="dot">Mallory</span><span class="tag bad">割り込み</span></div>' +
+        '<div class="bubble">' + esc(text) + "</div>" +
+        '<div class="chips">' + gOutChip(a.who, a.outcome) + "</div></div></div>";
+    }
+  });
+  log.innerHTML = h;
+  scrollToCur(log);
+}
+
+/* ---- 右：裏側 ---- */
+function gBoxView(cur, prev) {
+  const pm = {};
+  (prev || []).forEach((b) => { pm[b.id] = b; });
+  const out = cur.map((b) => {
+    const o = { id: b.id, label: b.label, fp: b.fp, index: b.index, unit: "iteration" };
+    if (prev) {
+      const p = pm[b.id];
+      if (!p) { o.changed = true; o.tag = "新規"; }
+      else if (p.fp !== b.fp || p.index !== b.index) o.changed = true;
+    }
+    return o;
+  });
+  if (prev) {
+    const ids = {};
+    cur.forEach((b) => { ids[b.id] = true; });
+    prev.forEach((p, pi) => {
+      if (!ids[p.id]) {
+        out.splice(Math.min(pi, out.length), 0, { id: p.id, label: p.label, fp: p.fp, index: p.index, unit: "iteration", old: true, tag: p.id.indexOf("skipped") === 0 ? "使用済み" : "置き換え前" });
+      }
+    });
+  }
+  return out;
+}
+function renderGroupStage() {
+  const members = GST.members;
+  const last = GST.last;
+  const n = members.length;
+  $("stage").style.setProperty("--cols", n === 3 ? "repeat(auto-fit, minmax(170px, 1fr))" : "repeat(2, minmax(0, 1fr))");
+  let h = "";
+  members.forEach((id) => {
+    let tcls = "", note = "";
+    if (last && gHasDelivery(last) && last.who === id) {
+      tcls = last.outcome === "ok" ? " t-ok" : " t-bad";
+      if (last.outcome !== "ok") note = "弾かれた（" + (GOUT_JA[last.outcome] || last.outcome) + "）";
+    }
+    const boxes = gBoxView(GST.keys[id] || [], GPREV ? (GPREV.keys[id] || []) : null);
+    h += '<div class="col' + tcls + '" data-char="' + id + '"><div class="col-head">' + portraitHtml(id) +
+      '<div><div class="cname dot">' + nm(id) + "</div></div></div>";
+    h += boxes.length ? '<div class="keys">' + boxes.map(keyHtml).join("") + "</div>" : '<p class="col-note">まだ Sender Key を持っていない</p>';
+    if (note) h += '<p class="col-note alert">' + esc(note) + "</p>";
+    h += "</div>";
+  });
+  $("stage").innerHTML = h;
+}
+function gEvText(e) {
+  const N = (id) => (id && CHARS[id] ? CHARS[id].name : String(id));
+  const who = N(e.who), snd = N(e.sender || e.who);
+  switch (e.kind) {
+    case "sender_key_created":
+      return who + " が自分の Sender Key を作った（iteration " + e.index + "、fp " + e.fp + "）";
+    case "sender_key_distributed":
+      return who + " が " + gNames(e.to) + " に Sender Key（iteration " + e.index + "）を配った";
+    case "sender_key_received":
+      return who + " が " + snd + " の Sender Key（iteration " + e.index + "）を受け取った";
+    case "sender_chain_step":
+      if (e.who === (e.sender || e.who)) return who + " が自分の鎖を " + e.from + " → " + e.to_index + " に進めた";
+      return who + " の手元の " + snd + " の鎖が iteration " + e.from + " → " + e.to_index + " に進んだ";
+    case "sender_message_key":
+      return who + " が iteration " + e.index + " 用のメッセージ鍵を使った（使ったら捨てる）";
+    case "signature_checked":
+      return e.ok ? who + " が " + snd + " の署名を確かめた：一致した" : who + " が " + snd + " の署名を確かめた：一致しなかったので弾いた";
+    case "skipped_key_stored":
+      return who + " が、まだ届いていない iteration " + e.index + " 用の鍵を取り置いた";
+    case "skipped_key_used":
+      return who + " が、取り置いた鍵で iteration " + e.index + " を開いた";
+    case "duplicate_rejected":
+      return who + " は iteration " + e.index + " を使い済み（または参加前）なので開けなかった";
+    case "no_sender_key":
+      return who + " は " + snd + " の Sender Key を持っていないので開けなかった";
+    default:
+      return JSON.stringify(e);
+  }
+}
+function renderGroup() {
+  const down = LOAD === "down";
+  $("live-error").hidden = !down;
+  $("panel-main").hidden = down;
+  $("caption").hidden = true;
+  $("json-details").hidden = down;
+  $("test-panel").hidden = down || LOAD !== "ready" || !GST;
+  $("chat-title").textContent = "グループチャット";
+  if (down) return;
+  const ready = LOAD === "ready" && !!GST;
+  $("live-msg").textContent = LMSG;
+  $("live-msg").hidden = !LMSG;
+  renderGroupControls(ready);
+  if (!ready) {
+    $("chat-log").innerHTML = '<div class="sys">サーバーに問い合わせています…</div>';
+    $("stage").innerHTML = "";
+    $("happen-list").innerHTML = "";
+    $("json-pre").textContent = "";
+    return;
+  }
+  renderGroupChat();
+  renderGroupStage();
+  const last = GST.last;
+  let lis = "";
+  if (!last) lis = '<li class="meta">まだ出来事はありません</li>';
+  else if (last.type === "join") lis = "<li>" + esc(nm(last.who) + " がグループに入った。libsignal の中は何も変わらない。" + nm(last.who) + " が読めるのは、このあと配られる Sender Key から先だけ") + "</li>";
+  else lis = (last.events || []).map((e) => "<li>" + esc(gEvText(e)) + '<span class="ev-tag">' + esc(e.kind) + "</span></li>").join("") ||
+    '<li class="meta">このステップで libsignal の出来事はありません</li>';
+  $("happen-list").innerHTML = lis;
+  $("json-pre").textContent = last ? JSON.stringify(last, null, 2) : "（まだ操作がありません）";
+  renderTestPanel();
+}
+
+function initGroup() {
+  $("g-from").addEventListener("change", (e) => { G_FROM = e.target.value; });
+  $("g-deliver").addEventListener("change", (e) => { G_DELIVER = e.target.checked; });
+  $("g-text").addEventListener("input", () => { $("g-send").disabled = LOAD !== "ready" || LBUSY || $("g-text").value.trim() === ""; });
+  const send = () => {
+    const text = $("g-text").value.trim();
+    if (!text || LBUSY || LOAD !== "ready") return;
+    runLive(async () => {
+      gSetState(await api("POST", "/api/group/send", { from: G_FROM, text, deliver: G_DELIVER }));
+      $("g-text").value = "";
+    });
+  };
+  $("g-send").addEventListener("click", send);
+  $("g-text").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); send(); }
+  });
+  $("g-reset").addEventListener("click", () => runLive(async () => {
+    const st = await api("POST", "/api/group/reset");
+    GST = st; GPREV = null; GGEN = null;
+  }));
+  $("g-joins").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-gjoin]");
+    if (!b || sceneId !== "glive") return;
+    runLive(async () => { gSetState(await api("POST", "/api/group/join", { who: b.dataset.gjoin })); });
+  });
+  $("chat-log").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-gact]");
+    if (!b || sceneId !== "glive") return;
+    const body = { message_id: Number(b.dataset.id), to: b.dataset.to };
+    runLive(async () => { gSetState(await api("POST", "/api/group/" + b.dataset.gact, body)); });
+  });
+}
+
 (function init() {
   initLive();
   const tabs = $("tabs");
@@ -685,7 +1005,7 @@ function initLive() {
   document.addEventListener("keydown", (e) => {
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
-    if (e.altKey || e.ctrlKey || e.metaKey || sceneId === "live") return;
+    if (e.altKey || e.ctrlKey || e.metaKey || sceneId === "live" || sceneId === "glive") return;
     if (e.key === "ArrowLeft") { go(stepIdx - 1); e.preventDefault(); }
     else if (e.key === "ArrowRight") { go(stepIdx + 1); e.preventDefault(); }
   });
