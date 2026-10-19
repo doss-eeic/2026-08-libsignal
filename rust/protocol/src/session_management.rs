@@ -166,37 +166,39 @@ pub async fn message_decrypt<R: Rng + CryptoRng>(
     kyber_pre_key_store: &mut dyn KyberPreKeyStore,
     csprng: &mut R,
 ) -> Result<Vec<u8>> {
-    match ciphertext {
-        CiphertextMessage::SignalMessage(m) => {
-            message_decrypt_signal(
-                m,
-                remote_address,
-                local_address,
-                session_store,
-                identity_store,
-                csprng,
-            )
-            .await
+    viz_observe!("receive", "message_decrypt", {
+        match ciphertext {
+            CiphertextMessage::SignalMessage(m) => {
+                message_decrypt_signal(
+                    m,
+                    remote_address,
+                    local_address,
+                    session_store,
+                    identity_store,
+                    csprng,
+                )
+                .await
+            }
+            CiphertextMessage::PreKeySignalMessage(m) => {
+                message_decrypt_prekey(
+                    m,
+                    remote_address,
+                    local_address,
+                    session_store,
+                    identity_store,
+                    pre_key_store,
+                    signed_pre_key_store,
+                    kyber_pre_key_store,
+                    csprng,
+                )
+                .await
+            }
+            _ => Err(SignalProtocolError::InvalidArgument(format!(
+                "message_decrypt cannot be used to decrypt {:?} messages",
+                ciphertext.message_type()
+            ))),
         }
-        CiphertextMessage::PreKeySignalMessage(m) => {
-            message_decrypt_prekey(
-                m,
-                remote_address,
-                local_address,
-                session_store,
-                identity_store,
-                pre_key_store,
-                signed_pre_key_store,
-                kyber_pre_key_store,
-                csprng,
-            )
-            .await
-        }
-        _ => Err(SignalProtocolError::InvalidArgument(format!(
-            "message_decrypt cannot be used to decrypt {:?} messages",
-            ciphertext.message_type()
-        ))),
-    }
+    })
 }
 
 /// Decrypt a [`PreKeySignalMessage`] from `remote_address`.
@@ -215,23 +217,31 @@ pub async fn message_decrypt_prekey<R: Rng + CryptoRng>(
     kyber_pre_key_store: &mut dyn KyberPreKeyStore,
     csprng: &mut R,
 ) -> Result<Vec<u8>> {
-    let mut session_record = session_store
-        .load_session(remote_address)
-        .await?
-        .unwrap_or_else(SessionRecord::new_fresh);
+    let mut session_record = viz_observe!(
+        "session_load",
+        "message_decrypt_prekey",
+        session_store
+            .load_session(remote_address)
+            .await
+            .map(|record| { record.unwrap_or_else(SessionRecord::new_fresh) })
+    )?;
 
     // Make sure we log the session state if we fail to process the pre-key.
-    let process_prekey_result = session::process_prekey(
-        ciphertext,
-        remote_address,
-        local_address,
-        &mut session_record,
-        identity_store,
-        pre_key_store,
-        signed_pre_key_store,
-        kyber_pre_key_store,
-    )
-    .await;
+    let process_prekey_result = viz_observe!(
+        "prekey_process",
+        "message_decrypt_prekey",
+        session::process_prekey(
+            ciphertext,
+            remote_address,
+            local_address,
+            &mut session_record,
+            identity_store,
+            pre_key_store,
+            signed_pre_key_store,
+            kyber_pre_key_store,
+        )
+        .await
+    );
 
     let (pre_key_used, identity_to_save) = match process_prekey_result {
         Ok(result) => result,
@@ -251,41 +261,61 @@ pub async fn message_decrypt_prekey<R: Rng + CryptoRng>(
         }
     };
 
-    let ptext = try_decrypt_from_record(
-        &mut session_record,
-        remote_address,
-        local_address,
-        ciphertext.message(),
-        CiphertextMessageType::PreKey,
-        csprng,
+    let ptext = viz_observe!(
+        "session_candidates",
+        "message_decrypt_prekey",
+        try_decrypt_from_record(
+            &mut session_record,
+            remote_address,
+            local_address,
+            ciphertext.message(),
+            CiphertextMessageType::PreKey,
+            csprng,
+        )
     )?;
 
-    identity_store
-        .save_identity(
-            identity_to_save.remote_address,
-            identity_to_save.their_identity_key,
-        )
-        .await?;
+    viz_observe!(
+        "identity_save",
+        "message_decrypt_prekey",
+        identity_store
+            .save_identity(
+                identity_to_save.remote_address,
+                identity_to_save.their_identity_key,
+            )
+            .await
+    )?;
 
-    if let Some(pre_key_used) = pre_key_used {
-        if let Some(kyber_pre_key_id) = pre_key_used.kyber_pre_key_id {
-            kyber_pre_key_store
-                .mark_kyber_pre_key_used(
-                    kyber_pre_key_id,
-                    pre_key_used.signed_ec_pre_key_id,
-                    ciphertext.base_key(),
-                )
-                .await?;
+    viz_observe!(
+        "prekey_cleanup",
+        "message_decrypt_prekey",
+        async {
+            if let Some(pre_key_used) = pre_key_used {
+                if let Some(kyber_pre_key_id) = pre_key_used.kyber_pre_key_id {
+                    kyber_pre_key_store
+                        .mark_kyber_pre_key_used(
+                            kyber_pre_key_id,
+                            pre_key_used.signed_ec_pre_key_id,
+                            ciphertext.base_key(),
+                        )
+                        .await?;
+                }
+
+                if let Some(pre_key_id) = pre_key_used.one_time_ec_pre_key_id {
+                    pre_key_store.remove_pre_key(pre_key_id).await?;
+                }
+            }
+            Ok(())
         }
+        .await
+    )?;
 
-        if let Some(pre_key_id) = pre_key_used.one_time_ec_pre_key_id {
-            pre_key_store.remove_pre_key(pre_key_id).await?;
-        }
-    }
-
-    session_store
-        .store_session(remote_address, &session_record)
-        .await?;
+    viz_observe!(
+        "session_save",
+        "message_decrypt_prekey",
+        session_store
+            .store_session(remote_address, &session_record)
+            .await
+    )?;
 
     Ok(ptext)
 }
@@ -302,23 +332,33 @@ pub async fn message_decrypt_signal<R: Rng + CryptoRng>(
     identity_store: &mut dyn IdentityKeyStore,
     csprng: &mut R,
 ) -> Result<Vec<u8>> {
-    let mut session_record = session_store
-        .load_session(remote_address)
-        .await?
-        .ok_or_else(|| {
-            SignalProtocolError::SessionNotFound(SessionNotFound::new(
-                remote_address.clone(),
-                "message_decrypt_signal",
-            ))
-        })?;
+    let mut session_record = viz_observe!(
+        "session_load",
+        "message_decrypt_signal",
+        session_store
+            .load_session(remote_address)
+            .await
+            .and_then(|record| {
+                record.ok_or_else(|| {
+                    SignalProtocolError::SessionNotFound(SessionNotFound::new(
+                        remote_address.clone(),
+                        "message_decrypt_signal",
+                    ))
+                })
+            })
+    )?;
 
-    let ptext = try_decrypt_from_record(
-        &mut session_record,
-        remote_address,
-        local_address,
-        ciphertext,
-        CiphertextMessageType::Whisper,
-        csprng,
+    let ptext = viz_observe!(
+        "session_candidates",
+        "message_decrypt_signal",
+        try_decrypt_from_record(
+            &mut session_record,
+            remote_address,
+            local_address,
+            ciphertext,
+            CiphertextMessageType::Whisper,
+            csprng,
+        )
     )?;
 
     // Why are we performing this check after decryption instead of before?
@@ -329,27 +369,43 @@ pub async fn message_decrypt_signal<R: Rng + CryptoRng>(
         .expect("successfully decrypted; must have a remote identity key")
         .expect("successfully decrypted; must have a remote identity key");
 
-    if !identity_store
-        .is_trusted_identity(remote_address, &their_identity_key, Direction::Receiving)
-        .await?
-    {
-        log::warn!(
-            "Identity key {} is not trusted for remote address {}",
-            hex::encode(their_identity_key.public_key().public_key_bytes()),
-            remote_address,
-        );
-        return Err(SignalProtocolError::UntrustedIdentity(
-            remote_address.clone(),
-        ));
-    }
+    viz_observe!(
+        "identity_trust",
+        "message_decrypt_signal",
+        identity_store
+            .is_trusted_identity(remote_address, &their_identity_key, Direction::Receiving)
+            .await
+            .and_then(|trusted| {
+                if trusted {
+                    Ok(())
+                } else {
+                    log::warn!(
+                        "Identity key {} is not trusted for remote address {}",
+                        hex::encode(their_identity_key.public_key().public_key_bytes()),
+                        remote_address,
+                    );
+                    Err(SignalProtocolError::UntrustedIdentity(
+                        remote_address.clone(),
+                    ))
+                }
+            })
+    )?;
 
-    identity_store
-        .save_identity(remote_address, &their_identity_key)
-        .await?;
+    viz_observe!(
+        "identity_save",
+        "message_decrypt_signal",
+        identity_store
+            .save_identity(remote_address, &their_identity_key)
+            .await
+    )?;
 
-    session_store
-        .store_session(remote_address, &session_record)
-        .await?;
+    viz_observe!(
+        "session_save",
+        "message_decrypt_signal",
+        session_store
+            .store_session(remote_address, &session_record)
+            .await
+    )?;
 
     Ok(ptext)
 }
@@ -576,37 +632,52 @@ pub(crate) fn try_decrypt_with_state<R: Rng + CryptoRng>(
     curr_or_prev_for_logging: CurrentOrPrevious,
     csprng: &mut R,
 ) -> Result<Vec<u8>> {
-    debug_assert_eq!(
-        state.session_version()?,
-        ciphertext.message_version() as u32
-    );
+    #[cfg(feature = "viz-trace")]
+    let _candidate = crate::viz_trace::candidate(match curr_or_prev_for_logging {
+        CurrentOrPrevious::Current => "current",
+        CurrentOrPrevious::Previous => "previous",
+    });
+    viz_observe!(
+        "candidate",
+        "try_decrypt_with_state",
+        (|| {
+            debug_assert_eq!(
+                state.session_version()?,
+                ciphertext.message_version() as u32
+            );
 
-    let self_session = try_scoped::<bool, InvalidSessionError>(|| {
-        Ok(state.local_identity_key()?.is_same_account(
-            local_address,
-            &state
-                .remote_identity_key()?
-                .ok_or(InvalidSessionError("missing remote identity key"))?,
-            remote_address,
-        ))
-    })
-    .inspect_err(|e| log::warn!("Failed to determine self_session: {}", e))
-    .unwrap_or_default();
-    let mut session = TripleRatchet::from_session_state(state, self_session)?;
+            let self_session = try_scoped::<bool, InvalidSessionError>(|| {
+                Ok(state.local_identity_key()?.is_same_account(
+                    local_address,
+                    &state
+                        .remote_identity_key()?
+                        .ok_or(InvalidSessionError("missing remote identity key"))?,
+                    remote_address,
+                ))
+            })
+            .inspect_err(|e| log::warn!("Failed to determine self_session: {}", e))
+            .unwrap_or_default();
+            let mut session = viz_observe!(
+                "ratchet_prepare",
+                "try_decrypt_with_state",
+                TripleRatchet::from_session_state(state, self_session)
+            )?;
 
-    let ptext = session.decrypt(
-        remote_address,
-        local_address,
-        ciphertext,
-        original_message_type,
-        curr_or_prev_for_logging,
-        csprng,
-    )?;
+            let ptext = session.decrypt(
+                remote_address,
+                local_address,
+                ciphertext,
+                original_message_type,
+                curr_or_prev_for_logging,
+                csprng,
+            )?;
 
-    session.apply_to_session_state(state);
-    state.clear_unacknowledged_pre_key_message();
+            session.apply_to_session_state(state);
+            state.clear_unacknowledged_pre_key_message();
 
-    Ok(ptext)
+            Ok(ptext)
+        })()
+    )
 }
 
 // ── Logging helpers ──────────────────────────────────────────────────────────

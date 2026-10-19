@@ -61,6 +61,7 @@
       <div class="pane">
         <p class="pane-label">裏側（libsignal の中の鍵）</p>
         <div class="stage-scroll"><div class="stage" id="stage"></div></div>
+        <section class="diagnosis" id="receive-diagnosis" aria-label="受信の診断" hidden></section>
         <div class="happen">
           <h3>このステップで起きたこと</h3>
           <ol id="happen-list"></ol>
@@ -121,6 +122,7 @@
   <p class="foot" id="foot">①〜③の表示は手作りのサンプルデータです。キーボードの ← → でも操作できます。④⑤は実際の libsignal の出力です。</p>
 </div>
 <script src="data.js"></script>
+<script src="diagnosis.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

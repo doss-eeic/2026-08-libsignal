@@ -84,6 +84,26 @@ body {
   line-height: 1.7;
 }
 .mono { font-family: "JetBrains Mono", monospace; }
+.diagnosis { margin: 16px 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.diagnosis h3, .diagnosis h4 { margin: 0 0 8px; }
+.diagnosis ol { list-style: none; padding: 0; margin: 0; }
+.diag-row { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.diag-row > div:first-child { display: flex; justify-content: space-between; gap: 12px; }
+.diag-row strong { white-space: nowrap; }
+.diag-ok strong, .diag-result.diag-ok { color: var(--ok); }
+.diag-error strong, .diag-result.diag-error { color: var(--bad); }
+.diag-skipped, .diag-unknown, .diag-source { color: var(--muted); }
+.diag-detail { margin: 5px 0; padding: 6px 8px; background: var(--bad-soft); border-radius: 4px; overflow-wrap: anywhere; font-size: 13px; }
+.diag-source { font-size: 12px; margin-top: 2px; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.diag-source summary { display: list-item; min-height: 0; }
+.diag-source code { overflow-wrap: anywhere; }
+.diag-candidate { margin: 10px 0 4px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); }
+.diag-candidate h4 { font-size: 13px; }
+.diag-badge { display: inline-block; margin-left: 8px; padding: 0 5px; border-radius: 4px; background: var(--surface); }
+.diag-badge.diag-ok { color: var(--ok); }
+.diag-badge.diag-error { color: var(--bad); }
+.diag-result { font-weight: 700; }
+.diag-final-error pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 .dot { font-family: "DotGothic16", sans-serif; font-weight: 400; }
 
 .wrap {

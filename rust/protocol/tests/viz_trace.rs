@@ -11,6 +11,12 @@ use support::*;
 
 type TestResult = Result<(), SignalProtocolError>;
 
+fn has_stage(events: &[VizEvent], stage: &str, status: &str) -> bool {
+    events
+        .iter()
+        .any(|e| e.kind == "decrypt_stage" && e.stage == Some(stage) && e.status == Some(status))
+}
+
 #[test]
 fn group_creation_distribution_and_normal_message() -> TestResult {
     async {
@@ -236,6 +242,11 @@ fn send_receive_and_reply() -> TestResult {
                     .iter()
                     .any(|e| e.kind == "message_key" && e.chain == Some("recv"))
             );
+            assert!(has_stage(&events, "authentication", "ok"));
+            assert!(has_stage(&events, "plaintext", "ok"));
+            assert!(has_stage(&events, "prekey_process", "ok"));
+            assert!(has_stage(&events, "session_save", "ok"));
+            assert!(has_stage(&events, "receive", "ok"));
             if index == 0 {
                 assert!(events.iter().any(|e| e.kind == "session_created"));
             }
@@ -338,10 +349,21 @@ fn tamper_records_one_mac_rejection_without_mutating_session() -> TestResult {
             decrypt(&mut b, &alice, &bob, &tampered).await,
             Err(SignalProtocolError::InvalidMessage(..))
         ));
+        let events = take();
         assert_eq!(
-            take().iter().filter(|e| e.kind == "mac_rejected").count(),
+            events.iter().filter(|e| e.kind == "mac_rejected").count(),
             1
         );
+        assert!(has_stage(&events, "key_prepare", "ok"));
+        assert!(has_stage(&events, "authentication", "error"));
+        assert!(has_stage(&events, "receive", "error"));
+        assert!(!events.iter().any(|e| {
+            e.kind == "decrypt_stage"
+                && matches!(
+                    e.stage,
+                    Some("plaintext" | "identity_save" | "session_save")
+                )
+        }));
         assert_eq!(
             before,
             b.load_session(&alice)
@@ -409,7 +431,21 @@ fn successful_archived_session_does_not_report_mac_rejection() -> TestResult {
             .await?,
             b"second"
         );
-        assert!(!take().iter().any(|e| e.kind == "mac_rejected"));
+        let events = take();
+        assert!(!events.iter().any(|e| e.kind == "mac_rejected"));
+        let failed = events
+            .iter()
+            .find(|e| e.stage == Some("candidate") && e.status == Some("error"))
+            .expect("current trial failed");
+        let succeeded = events
+            .iter()
+            .find(|e| e.stage == Some("candidate") && e.status == Some("ok"))
+            .expect("archived trial succeeded");
+        assert_ne!(failed.candidate, succeeded.candidate);
+        assert_eq!(failed.candidate_kind, Some("current"));
+        assert_eq!(succeeded.candidate_kind, Some("previous"));
+        assert!(has_stage(&events, "session_save", "ok"));
+        assert!(has_stage(&events, "receive", "ok"));
         Ok(())
     }
     .now_or_never()

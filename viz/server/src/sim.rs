@@ -293,7 +293,10 @@ impl Sim {
         }
         libsignal_protocol::viz_trace::start();
         let result = (|| {
-            let msg = parse(ty, &bytes)?;
+            libsignal_protocol::viz_trace::stage_started("parse", "sim::parse");
+            let parsed = parse(ty, &bytes);
+            libsignal_protocol::viz_trace::stage_finished("parse", "sim::parse", &parsed);
+            let msg = parsed?;
             self.decrypt(who, &msg)
         })();
         let ev = events(who);
@@ -558,8 +561,31 @@ mod tests {
         let before = serde_json::to_string(&s.state().bob)?;
         s.tamper(3)?;
         assert_eq!(s.script.last().unwrap().outcome, Outcome::BadMac);
+        let last = s.script.last().unwrap();
+        assert!(
+            last.events
+                .iter()
+                .any(|e| { e.event.stage == Some("parse") && e.event.status == Some("ok") })
+        );
+        assert!(last.events.iter().any(|e| {
+            e.event.stage == Some("authentication") && e.event.status == Some("error")
+        }));
+        assert!(
+            !last
+                .events
+                .iter()
+                .any(|e| e.event.stage == Some("session_save"))
+        );
         assert_eq!(before, serde_json::to_string(&s.state().bob)?);
         s.deliver(3)?;
+        assert!(
+            s.script
+                .last()
+                .unwrap()
+                .events
+                .iter()
+                .any(|e| { e.event.stage == Some("session_save") && e.event.status == Some("ok") })
+        );
         s.replay(3)?;
         assert_eq!(s.script.last().unwrap().outcome, Outcome::Duplicate);
         Ok(())
@@ -570,7 +596,28 @@ mod tests {
         s.send(Who::Alice, "first".into(), false)?;
         s.tamper(1)?;
         assert_eq!(s.script.last().unwrap().outcome, Outcome::BadMac);
+        assert!(
+            s.script.last().unwrap().events.iter().any(|e| {
+                e.event.stage == Some("prekey_process") && e.event.status == Some("ok")
+            })
+        );
         assert_eq!(s.messages[0].view.status, "waiting");
+        Ok(())
+    }
+    #[test]
+    fn malformed_message_fails_before_decryption() -> Result<()> {
+        let mut s = Sim::new()?;
+        s.send(Who::Alice, "first".into(), false)?;
+        s.messages[0].bytes.clear();
+        s.deliver(1)?;
+        let last = s.script.last().unwrap();
+        assert_eq!(last.outcome, Outcome::Error);
+        assert!(
+            last.events
+                .iter()
+                .any(|e| { e.event.stage == Some("parse") && e.event.status == Some("error") })
+        );
+        assert!(!last.events.iter().any(|e| e.event.stage == Some("receive")));
         Ok(())
     }
     #[test]

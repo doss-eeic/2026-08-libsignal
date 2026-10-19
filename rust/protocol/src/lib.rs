@@ -35,6 +35,19 @@ macro_rules! viz_record {
     };
 }
 
+// Observe an existing Result without changing its value or error type.
+// The observation calls disappear when viz-trace is disabled.
+macro_rules! viz_observe {
+    ($stage:literal, $source:literal, $operation:expr) => {{
+        #[cfg(feature = "viz-trace")]
+        crate::viz_trace::stage_started($stage, $source);
+        let result: crate::Result<_> = $operation;
+        #[cfg(feature = "viz-trace")]
+        crate::viz_trace::stage_finished($stage, $source, &result);
+        result
+    }};
+}
+
 #[cfg(feature = "viz-trace")]
 pub mod viz_trace;
 
