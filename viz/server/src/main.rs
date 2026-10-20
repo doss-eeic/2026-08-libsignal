@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 
-use crate::sim::{Expect, Sim, Who};
+use crate::sim::{Expect, Sim, TamperMode, Who};
 
 type Shared = Arc<Mutex<Sim>>;
 type ApiResult<T> = Result<Json<T>, ApiError>;
@@ -49,6 +49,12 @@ struct SendRequest {
 #[derive(Deserialize)]
 struct IdRequest {
     message_id: u32,
+}
+#[derive(Deserialize)]
+struct TamperRequest {
+    message_id: u32,
+    #[serde(default)]
+    mode: TamperMode,
 }
 #[derive(Deserialize)]
 struct ExpectRequest {
@@ -121,7 +127,19 @@ async fn send(
         return Err(bad("本文は1〜200文字で入力してください"));
     }
     let mut s = sim.lock().await;
-    s.send(r.from, r.text, r.deliver).map_err(internal)?;
+    s.send(r.from, r.text, r.deliver).map_err(|error| {
+        if matches!(
+            error.downcast_ref::<libsignal_protocol::SignalProtocolError>(),
+            Some(libsignal_protocol::SignalProtocolError::SessionNotFound(..))
+        ) {
+            ApiError(
+                StatusCode::CONFLICT,
+                "送信の準備ができていません。まずAliceから送り、Bobへ届けてください".into(),
+            )
+        } else {
+            internal(error)
+        }
+    })?;
     Ok(Json(s.state()))
 }
 async fn deliver(
@@ -132,9 +150,16 @@ async fn deliver(
 }
 async fn tamper(
     State(sim): State<Shared>,
-    body: Result<Json<IdRequest>, axum::extract::rejection::JsonRejection>,
+    body: Result<Json<TamperRequest>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<sim::State> {
-    alter(sim, body, |s, r| s.tamper(r.message_id)).await
+    let Json(r) = body.map_err(|_| bad("リクエストのJSONが正しくありません"))?;
+    let mut s = sim.lock().await;
+    match r.mode {
+        TamperMode::BodyBitFlip => s.tamper(r.message_id),
+        mode => s.experiment(r.message_id, mode),
+    }
+    .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
+    Ok(Json(s.state()))
 }
 async fn replay(
     State(sim): State<Shared>,
@@ -409,6 +434,134 @@ mod tests {
                 !value["error"].as_str().expect("error string").is_ascii(),
                 "{path}: {body}"
             );
+        }
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn experiment_api_reports_original_errors_and_validates_modes() -> anyhow::Result<()> {
+        let app = app_router(Arc::new(Mutex::new(Sim::new()?)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        for (path, body, expected, outcome, stage) in [
+            (
+                "/api/send",
+                r#"{"from":"bob","text":"not ready","deliver":true}"#,
+                409,
+                "",
+                "",
+            ),
+            (
+                "/api/send",
+                r#"{"from":"alice","text":"first","deliver":false}"#,
+                200,
+                "ok",
+                "",
+            ),
+            (
+                "/api/send",
+                r#"{"from":"bob","text":"still not delivered","deliver":true}"#,
+                409,
+                "",
+                "",
+            ),
+            (
+                "/api/tamper",
+                r#"{"message_id":1,"mode":"unknown"}"#,
+                400,
+                "",
+                "",
+            ),
+            (
+                "/api/tamper",
+                r#"{"message_id":1,"mode":"no_session"}"#,
+                409,
+                "",
+                "",
+            ),
+            (
+                "/api/tamper",
+                r#"{"message_id":1,"mode":"untrusted_identity"}"#,
+                409,
+                "",
+                "",
+            ),
+            (
+                "/api/tamper",
+                r#"{"message_id":1,"mode":"truncate"}"#,
+                200,
+                "too_short",
+                "parse",
+            ),
+            (
+                "/api/tamper",
+                r#"{"message_id":1}"#,
+                200,
+                "bad_mac",
+                "authentication",
+            ),
+            ("/api/deliver", r#"{"message_id":1}"#, 200, "ok", ""),
+            (
+                "/api/send",
+                r#"{"from":"bob","text":"reply","deliver":true}"#,
+                200,
+                "ok",
+                "",
+            ),
+            (
+                "/api/send",
+                r#"{"from":"alice","text":"normal","deliver":false}"#,
+                200,
+                "ok",
+                "",
+            ),
+            (
+                "/api/tamper",
+                r#"{"message_id":3,"mode":"no_session"}"#,
+                200,
+                "no_session",
+                "session_load",
+            ),
+            (
+                "/api/tamper",
+                r#"{"message_id":3,"mode":"untrusted_identity"}"#,
+                200,
+                "untrusted_identity",
+                "identity_trust",
+            ),
+            ("/api/deliver", r#"{"message_id":3}"#, 200, "ok", ""),
+        ] {
+            let mut stream = tokio::net::TcpStream::connect(address).await?;
+            stream.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await?;
+            let (headers, body) = response.split_once("\r\n\r\n").expect("HTTP response");
+            assert!(
+                headers.starts_with(&format!("HTTP/1.1 {expected}")),
+                "{path}: {headers} {body}"
+            );
+            let state: Value = serde_json::from_str(body)?;
+            if expected == 200 {
+                assert_eq!(state["last"]["outcome"], outcome);
+                if !stage.is_empty() {
+                    assert!(
+                        state["last"]["events"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|e| e["stage"] == stage && e["status"] == "error")
+                    );
+                }
+            } else {
+                assert!(!state["error"].as_str().unwrap().is_ascii());
+                if path == "/api/send" {
+                    let error = state["error"].as_str().unwrap();
+                    assert!(error.contains("Alice"));
+                    assert!(!error.contains("message_encrypt"));
+                }
+            }
         }
         server.abort();
         Ok(())

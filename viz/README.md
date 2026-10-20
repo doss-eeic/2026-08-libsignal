@@ -67,6 +67,27 @@ rust/protocol（本物の libsignal）
 認証の段階はMACだけでなくアドレス確認も含むため、「認証の検証（MAC・アドレス）」という名前です。
 相手の信頼確認と保存は、通常メッセージとPreKeyで元の処理順が異なり、画面もそれぞれの経路に合わせています。
 
+## ④ 改ざん・受信条件の実験
+
+最初はAliceから送ります。最初のメッセージがBobへ届くと、Bobも選べるようになります。「最初から」に戻すと、送信者もAliceへ戻ります。
+
+通常の配達は、これまでどおり「すぐ届ける」または「届ける」を使います。エラーを観察するときは「すぐ届ける」をオフにして送り、待機中メッセージの小さな選択欄で種類を選んで「実験」を押します。
+
+| 実験 | 変えるもの | 実際に拒否する処理・段階 |
+| --- | --- | --- |
+| 本文の1ビット改ざん | 配達用コピーの暗号化本文の1ビット | `TripleRatchet::decrypt` の認証の検証 |
+| 短すぎるメッセージ | 配達用コピー全体を0バイトにする（本文の文字数を減らす操作ではない） | `SignalMessage::try_from` / `PreKeySignalMessage::try_from` の形式の読み取り。`message_decrypt` には入らない |
+| セッションなし | 受信側の保管庫のコピーでセッション保管庫だけを空にする | `message_decrypt_signal` の `load_session` 後の存在確認 |
+| 相手の身元の鍵を信頼できない | 受信側の保管庫のコピーが覚えている相手の身元の鍵を別の鍵に置き換える。暗号文・セッションは維持 | `message_decrypt_signal` の `is_trusted_identity`。通常経路では認証・本文復号が成功してから拒否される |
+
+後ろ2つは通常の `SignalMessage` 用です。Aliceの最初のメッセージを届ける → Bobから返信を届ける → Aliceから「すぐ届ける」をオフにして送る、の順で準備すると試せます。初回の `PreKeySignalMessage` では選択できず、APIから指定しても説明付きで拒否します。
+
+受信側の条件を変える実験では、`InMemSignalProtocolStore::clone` で作ったコピーを使います。元の保管庫・元のメッセージ・配達済み件数は変えず、実験後に「届ける」を押して本来のメッセージを正常に受信できます。画面の鍵の保管庫は元の状態、受信の診断は実験用コピーで実行した記録であることを明記しています。
+
+実験の準備は `viz/server/src/sim.rs` の `experiment` / `decrypt_index` / `decrypt` にあります。停止箇所は、既存の `sim::parse` と libsignal の `message_decrypt_signal` 内にある段階記録から得ます。エラーを表示用に作ったり、暗号処理や信頼判定を変更したりはしていません。`classify` は返ってきたエラー型を `too_short` / `no_session` / `untrusted_identity` へ分類するだけです。
+
+`POST /api/tamper` の `mode` は `body_bit_flip`（省略時の従来動作）/ `truncate` / `no_session` / `untrusted_identity`。実験の種類は操作履歴の `tamper_mode` に保存され、「テストを作る」で生成するRustテストにも再現されます。
+
 ## ⑤ グループ（Sender Keys）
 
 Alice と Bob から始め、Carol と Dave が後から参加できます。`/api/group/` で、本物の libsignal の Sender Keys による配布・送信・配達・改ざん・再送を操作します。参加者ごとに、各送信者の鎖の現在位置と、順序が逆に届いたときの取り置きの鍵を指紋で確認できます。`skipped_key_stored`、`skipped_key_used`、`duplicate_rejected` はグループでも同じ意味です。

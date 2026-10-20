@@ -57,6 +57,54 @@ test("parse failure is distinguished from a failure inside decryption", () => {
   assert.equal(model.candidates.length, 0);
 });
 
+test("truncated message stops at the observed parser without inventing decryption", () => {
+  const received = { ...action([event("parse", "error", undefined, { detail: "message too short" })], "too_short"), type: "tamper", tamper_mode: "truncate" };
+  const model = receiveDiagnosis(received, { kind: "prekey" });
+  assert.equal(status(model, "parse"), "error");
+  assert.equal(status(model, "prekey_process"), "skipped");
+  assert.equal(model.candidates.length, 0);
+  assert.ok(diagnosisHtml(received, { kind: "prekey" }).includes('停止した段階：<strong>形式の読み取り</strong>'));
+});
+
+test("missing session is an observed receiver-copy failure before candidate decryption", () => {
+  const received = { ...action([event("parse", "ok"), event("session_load", "error")], "no_session"), type: "tamper", tamper_mode: "no_session" };
+  const model = receiveDiagnosis(received, { kind: "whisper" });
+  assert.equal(status(model, "parse"), "ok");
+  assert.equal(status(model, "session_load"), "error");
+  assert.equal(status(model, "session_candidates"), "skipped");
+  assert.equal(model.candidates.length, 0);
+  const html = diagnosisHtml(received, { kind: "whisper" });
+  assert.ok(html.includes('停止した段階：<strong>セッションの取得・準備</strong>'));
+  assert.ok(html.includes("保管庫のコピー"));
+  assert.ok(html.includes("表示中の元の保管庫とメッセージは変更しません"));
+});
+
+test("identity rejection preserves successful plaintext observation and skips persistence", () => {
+  const received = { ...action([
+    event("parse", "ok"), event("session_load", "ok"),
+    event("ratchet_prepare", "ok", 0), event("key_prepare", "ok", 0),
+    event("authentication", "ok", 0), event("plaintext", "ok", 0), event("candidate", "ok", 0),
+    event("session_candidates", "ok"), event("identity_trust", "error")
+  ], "untrusted_identity"), type: "tamper", tamper_mode: "untrusted_identity" };
+  const model = receiveDiagnosis(received, { kind: "whisper" });
+  assert.equal(model.ok, false);
+  assert.equal(model.candidates[0].result, "ok");
+  assert.equal(status(model.candidates[0], "plaintext"), "ok");
+  assert.equal(status(model, "identity_trust"), "error");
+  assert.equal(status(model, "identity_save"), "skipped");
+  assert.equal(status(model, "session_save"), "skipped");
+  const html = diagnosisHtml(received, { kind: "whisper" });
+  assert.ok(html.includes('停止した段階：<strong>相手の身元の鍵を信頼できるか確認</strong>'));
+  assert.ok(html.includes("✕ 受信失敗"));
+});
+
+test("experiment modes do not substitute for missing stage evidence", () => {
+  const received = { ...action([event("parse", "ok")], "no_session"), type: "tamper", tamper_mode: "no_session" };
+  const model = receiveDiagnosis(received, { kind: "whisper" });
+  assert.equal(status(model, "session_load"), "unknown");
+  assert.ok(!diagnosisHtml(received, { kind: "whisper" }).includes("停止した段階"));
+});
+
 test("missing observations are not presented as successful or unexecuted", () => {
   assert.equal(receiveDiagnosis(null, null), null);
   assert.equal(receiveDiagnosis({ type: "send", delivered_now: false }, null), null);

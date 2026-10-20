@@ -73,6 +73,7 @@ function receiveDiagnosis(action, message, options = {}) {
     recorded: true,
     messageId: action.message_id,
     group, prekey,
+    receiverExperiment: !group && action.type === "tamper" && ["no_session", "untrusted_identity"].includes(action.tamper_mode),
     sender: options.senderLabel || message?.from || "",
     receiver: options.receiverLabel || (group ? action.who : message?.to) || "",
     ok: action.outcome === "ok",
@@ -109,6 +110,7 @@ function diagnosisHtml(action, message, options = {}) {
   const trialNote = selected ? '<p class="diag-note">' + (model.candidates.length > 1 ? model.candidates.length + '候補を試行（失敗 ' + trialFailures + '件）。' : '') + escape(candidateName(selected)) + 'の処理を表示。全候補は詳細へ。</p>' : '';
   return '<div class="diag-heading"><h3>受信の診断 <span class="mono">#' + escape(model.messageId) + '</span></h3><strong class="diag-result diag-' + (model.ok ? 'ok' : 'error') + '">' + (model.ok ? '✓ 受信成功' : '✕ 受信失敗') + '</strong></div>' +
     '<p class="diag-context">' + (route ? '<b>' + route + '</b><span> · </span>' : '') + kind + '</p>' +
+    (model.receiverExperiment ? '<p class="diag-note">保管庫のコピーで試しています。表示中の元の保管庫とメッセージは変更しません。</p>' : '') +
     (failure ? '<p class="diag-stop" role="status">停止した段階：<strong>' + escape(failure.label) + '</strong></p>' : '') +
     '<ol class="diag-pipeline" aria-label="復号処理の順序">' + pipeline.map(chip).join("") + '</ol>' + trialNote +
     '<details class="diag-more"><summary>関数・エラー' + (model.candidates.length > 1 ? '・全候補' : '') + 'の詳細</summary><div class="diag-detail-scroll" tabindex="0" role="region" aria-label="復号の詳しい記録"><ol>' + details + '</ol>' +
