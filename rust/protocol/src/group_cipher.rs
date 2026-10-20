@@ -131,78 +131,111 @@ pub async fn group_decrypt(
     sender_key_store: &mut dyn SenderKeyStore,
     sender: &ProtocolAddress,
 ) -> Result<Vec<u8>> {
-    let skm = SenderKeyMessage::try_from(skm_bytes)?;
+    viz_observe!("receive", "group_decrypt", async {
+        let skm = viz_observe!(
+            "parse",
+            "group_decrypt",
+            SenderKeyMessage::try_from(skm_bytes)
+        )?;
 
-    let distribution_id = skm.distribution_id();
-    let chain_id = skm.chain_id();
+        let distribution_id = skm.distribution_id();
+        let chain_id = skm.chain_id();
 
-    let mut record = sender_key_store
-        .load_sender_key(sender, skm.distribution_id())
-        .await?
-        .ok_or_else(|| {
-            viz_record!("no_sender_key");
-            SignalProtocolError::NoSenderKeyState { distribution_id }
-        })?;
+        let mut record = viz_observe!(
+            "sender_key_load",
+            "group_decrypt",
+            sender_key_store
+                .load_sender_key(sender, distribution_id)
+                .await
+                .and_then(|record| {
+                    record.ok_or_else(|| {
+                        viz_record!("no_sender_key");
+                        SignalProtocolError::NoSenderKeyState { distribution_id }
+                    })
+                })
+        )?;
 
-    let sender_key_state = match record.sender_key_state_for_chain_id(chain_id) {
-        Some(state) => state,
-        None => {
-            log::error!(
-                "SenderKey distribution {} could not find chain ID {} (known chain IDs: {:?})",
-                distribution_id,
-                chain_id,
-                record.chain_ids_for_logging().collect::<Vec<_>>(),
-            );
-            viz_record!("no_sender_key");
-            return Err(SignalProtocolError::NoSenderKeyState { distribution_id });
-        }
-    };
+        let sender_key_state = viz_observe!(
+            "sender_key_state",
+            "group_decrypt",
+            match record.sender_key_state_for_chain_id(chain_id) {
+                Some(state) => {
+                    let message_version = skm.message_version() as u32;
+                    if message_version != state.message_version() {
+                        Err(SignalProtocolError::UnrecognizedMessageVersion(message_version))
+                    } else {
+                        Ok(state)
+                    }
+                }
+                None => {
+                    log::error!(
+                        "SenderKey distribution {} could not find chain ID {} (known chain IDs: {:?})",
+                        distribution_id,
+                        chain_id,
+                        record.chain_ids_for_logging().collect::<Vec<_>>(),
+                    );
+                    viz_record!("no_sender_key");
+                    Err(SignalProtocolError::NoSenderKeyState { distribution_id })
+                }
+            }
+        )?;
 
-    let message_version = skm.message_version() as u32;
-    if message_version != sender_key_state.message_version() {
-        return Err(SignalProtocolError::UnrecognizedMessageVersion(
-            message_version,
-        ));
-    }
+        viz_observe!(
+            "signature",
+            "group_decrypt",
+            (|| {
+                let signing_key = sender_key_state
+                    .signing_key_public()
+                    .map_err(|_| SignalProtocolError::InvalidSenderKeySession { distribution_id })?;
+                let signature_ok = skm.verify_signature(&signing_key)?;
+                viz_record!("signature_checked", ok: Some(signature_ok));
+                if !signature_ok {
+                    return Err(SignalProtocolError::SignatureValidationFailed);
+                }
+                Ok(())
+            })()
+        )?;
 
-    let signing_key = sender_key_state
-        .signing_key_public()
-        .map_err(|_| SignalProtocolError::InvalidSenderKeySession { distribution_id })?;
-    let signature_ok = skm.verify_signature(&signing_key)?;
-    viz_record!("signature_checked", ok: Some(signature_ok));
-    if !signature_ok {
-        return Err(SignalProtocolError::SignatureValidationFailed);
-    }
+        let sender_key = viz_observe!(
+            "key_prepare",
+            "group_decrypt",
+            get_sender_key(sender_key_state, skm.iteration(), distribution_id)
+        )?;
+        viz_record!("sender_message_key", index: Some(sender_key.iteration()), fp: Some(sender_key.viz_fp()));
 
-    let sender_key = get_sender_key(sender_key_state, skm.iteration(), distribution_id)?;
-    viz_record!("sender_message_key", index: Some(sender_key.iteration()), fp: Some(sender_key.viz_fp()));
+        let plaintext = viz_observe!(
+            "plaintext",
+            "group_decrypt",
+            match signal_crypto::aes_256_cbc_decrypt(
+                skm.ciphertext(),
+                sender_key.cipher_key(),
+                sender_key.iv(),
+            ) {
+                Ok(plaintext) => Ok(plaintext),
+                Err(signal_crypto::DecryptionError::BadKeyOrIv) => {
+                    log::error!(
+                        "incoming sender key state corrupt for {sender}, distribution ID {distribution_id}, chain ID {chain_id}",
+                    );
+                    Err(SignalProtocolError::InvalidSenderKeySession { distribution_id })
+                }
+                Err(signal_crypto::DecryptionError::BadCiphertext(msg)) => {
+                    log::error!("sender key decryption failed: {msg}");
+                    Err(SignalProtocolError::InvalidMessage(
+                        CiphertextMessageType::SenderKey,
+                        format!("decryption failed: {msg}"),
+                    ))
+                }
+            }
+        )?;
 
-    let plaintext = match signal_crypto::aes_256_cbc_decrypt(
-        skm.ciphertext(),
-        sender_key.cipher_key(),
-        sender_key.iv(),
-    ) {
-        Ok(plaintext) => plaintext,
-        Err(signal_crypto::DecryptionError::BadKeyOrIv) => {
-            log::error!(
-                "incoming sender key state corrupt for {sender}, distribution ID {distribution_id}, chain ID {chain_id}",
-            );
-            return Err(SignalProtocolError::InvalidSenderKeySession { distribution_id });
-        }
-        Err(signal_crypto::DecryptionError::BadCiphertext(msg)) => {
-            log::error!("sender key decryption failed: {msg}");
-            return Err(SignalProtocolError::InvalidMessage(
-                CiphertextMessageType::SenderKey,
-                format!("decryption failed: {msg}"),
-            ));
-        }
-    };
+        viz_observe!(
+            "sender_key_save",
+            "group_decrypt",
+            sender_key_store.store_sender_key(sender, distribution_id, &record).await
+        )?;
 
-    sender_key_store
-        .store_sender_key(sender, distribution_id, &record)
-        .await?;
-
-    Ok(plaintext)
+        Ok(plaintext)
+    }.await)
 }
 
 pub async fn process_sender_key_distribution_message(

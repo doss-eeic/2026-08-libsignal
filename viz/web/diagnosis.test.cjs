@@ -73,3 +73,97 @@ test("error and source strings are rendered as text", () => {
   assert.ok(html.includes("&lt;script&gt;"));
   assert.ok(!html.includes("<img"));
 });
+
+const groupOptions = { mode: "group", senderLabel: "Alice", receiverLabel: "Bob" };
+const groupMessage = { from: "alice" };
+const groupStages = ["parse", "sender_key_load", "sender_key_state", "signature", "key_prepare", "plaintext", "sender_key_save"];
+
+test("group success follows Sender Keys order and names its sender and receiver", () => {
+  const received = { ...action(groupStages.map((stage) => event(stage, "ok")), "ok"), who: "bob" };
+  const model = receiveDiagnosis(received, groupMessage, groupOptions);
+  assert.equal(model.group, true);
+  assert.equal(model.ok, true);
+  assert.deepEqual(model.rows.map((row) => row.stage), groupStages);
+  assert.equal(model.rows.every((row) => row.status === "ok"), true);
+  assert.deepEqual(model.candidates, []);
+  const html = diagnosisHtml(received, groupMessage, groupOptions);
+  assert.ok(html.includes("Alice → Bob"));
+  assert.ok(html.includes("グループ · Sender Keys"));
+  assert.ok(html.includes("受信成功"));
+  assert.ok(!html.includes("MAC・アドレス"));
+});
+
+test("group signature rejection occurs before message-key preparation", () => {
+  const received = action([
+    ...groupStages.slice(0, 3).map((stage) => event(stage, "ok")),
+    event("signature", "error", undefined, { source: "group_decrypt", detail: "signature verification failed" })
+  ]);
+  const model = receiveDiagnosis(received, groupMessage, groupOptions);
+  assert.equal(status(model, "signature"), "error");
+  assert.equal(status(model, "key_prepare"), "skipped");
+  assert.equal(status(model, "plaintext"), "skipped");
+  assert.equal(status(model, "sender_key_save"), "skipped");
+  const html = diagnosisHtml(received, groupMessage, groupOptions);
+  assert.ok(html.includes('停止した段階：<strong>送信者の署名を検証</strong>'));
+  assert.ok(html.indexOf('停止した段階') < html.indexOf('<details'));
+  assert.ok(html.includes("group_decrypt"));
+});
+
+test("group missing sender record skips signature and key operations", () => {
+  const model = receiveDiagnosis(action([
+    event("parse", "ok"), event("sender_key_load", "error")
+  ]), groupMessage, groupOptions);
+  assert.equal(status(model, "sender_key_load"), "error");
+  assert.equal(status(model, "sender_key_state"), "skipped");
+  assert.equal(status(model, "signature"), "skipped");
+  assert.equal(status(model, "key_prepare"), "skipped");
+});
+
+test("group duplicate can pass signature but fail while obtaining the used message key", () => {
+  const received = action([
+    ...groupStages.slice(0, 4).map((stage) => event(stage, "ok")),
+    event("key_prepare", "error", undefined, { detail: "message with old counter" })
+  ], "duplicate");
+  const model = receiveDiagnosis(received, groupMessage, groupOptions);
+  assert.equal(status(model, "signature"), "ok");
+  assert.equal(status(model, "key_prepare"), "error");
+  assert.equal(status(model, "plaintext"), "skipped");
+  assert.equal(status(model, "sender_key_save"), "skipped");
+});
+
+test("group sends and joins without decrypt records do not invent a receive", () => {
+  ["send", "join"].forEach((type) => {
+    const operation = { type, events: [{ kind: "sender_key_created" }] };
+    assert.equal(receiveDiagnosis(operation, groupMessage, groupOptions), null);
+    assert.equal(diagnosisHtml(operation, groupMessage, groupOptions), "");
+  });
+  assert.equal(receiveDiagnosis(action([]), groupMessage, groupOptions).recorded, false);
+  const model = receiveDiagnosis(action([event("parse", "ok")], "ok"), groupMessage, groupOptions);
+  assert.equal(status(model, "sender_key_save"), "unknown");
+});
+
+test("compact fallback summary preserves failed trials without claiming the receive stopped", () => {
+  const received = action([
+    event("parse", "ok"), event("session_load", "ok"),
+    event("authentication", "error", 0), event("candidate", "error", 0),
+    event("authentication", "ok", 1), event("plaintext", "ok", 1), event("candidate", "ok", 1),
+    event("session_candidates", "ok"), event("identity_trust", "ok"),
+    event("identity_save", "ok"), event("session_save", "ok")
+  ], "ok");
+  const html = diagnosisHtml(received, { kind: "whisper" });
+  assert.ok(html.includes("受信成功"));
+  assert.ok(html.includes("2候補を試行（失敗 1件）"));
+  assert.ok(!html.includes("停止した段階"));
+  assert.equal((html.match(/<details/g) || []).length, 1);
+  assert.ok(html.includes("候補 1（現在）"));
+  assert.ok(html.includes("候補 2（過去）"));
+});
+
+test("group route and API errors cannot introduce markup", () => {
+  const received = { ...action([event("parse", "error")]), error: '<a href="x">bad</a>' };
+  const html = diagnosisHtml(received, groupMessage, { mode: "group", senderLabel: "<script>", receiverLabel: "<img>" });
+  assert.ok(html.includes("&lt;script&gt; → &lt;img&gt;"));
+  assert.ok(html.includes("&lt;a href=&quot;x&quot;&gt;bad&lt;/a&gt;"));
+  assert.ok(!html.includes("<script>"));
+  assert.ok(!html.includes("<img>"));
+});
