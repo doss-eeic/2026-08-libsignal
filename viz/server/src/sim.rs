@@ -4,10 +4,10 @@ use anyhow::{Result, anyhow};
 use futures::FutureExt;
 use libsignal_protocol::{
     CiphertextMessage, CiphertextMessageType, DeviceId, GenericSignedPreKey, IdentityKeyPair,
-    IdentityKeyStore, InMemSignalProtocolStore, KeyPair, KyberPreKeyRecord, KyberPreKeyStore,
-    PreKeyBundle, PreKeyRecord, PreKeySignalMessage, PreKeyStore, ProtocolAddress, SessionStore,
-    SignalMessage, SignalProtocolError, SignedPreKeyRecord, SignedPreKeyStore, Timestamp, kem,
-    message_decrypt, message_encrypt, process_prekey_bundle,
+    IdentityKeyStore, InMemSessionStore, InMemSignalProtocolStore, KeyPair, KyberPreKeyRecord,
+    KyberPreKeyStore, PreKeyBundle, PreKeyRecord, PreKeySignalMessage, PreKeyStore,
+    ProtocolAddress, SessionStore, SignalMessage, SignalProtocolError, SignedPreKeyRecord,
+    SignedPreKeyStore, Timestamp, kem, message_decrypt, message_encrypt, process_prekey_bundle,
 };
 use rand::{CryptoRng, Rng, TryRngCore as _, rngs::OsRng};
 use serde::{Deserialize, Serialize};
@@ -37,12 +37,26 @@ pub(crate) enum ActionType {
     Replay,
 }
 
+/// The experiment changes a wire copy or an isolated receiver store, never the original.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TamperMode {
+    #[default]
+    BodyBitFlip,
+    Truncate,
+    NoSession,
+    UntrustedIdentity,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Outcome {
     Ok,
     Duplicate,
     BadMac,
+    TooShort,
+    NoSession,
+    UntrustedIdentity,
     Error,
 }
 
@@ -52,6 +66,9 @@ pub(crate) enum Expect {
     Ok,
     Duplicate,
     BadMac,
+    TooShort,
+    NoSession,
+    UntrustedIdentity,
     Error,
     AnyError,
 }
@@ -61,6 +78,9 @@ impl From<Outcome> for Expect {
             Outcome::Ok => Self::Ok,
             Outcome::Duplicate => Self::Duplicate,
             Outcome::BadMac => Self::BadMac,
+            Outcome::TooShort => Self::TooShort,
+            Outcome::NoSession => Self::NoSession,
+            Outcome::UntrustedIdentity => Self::UntrustedIdentity,
             Outcome::Error => Self::Error,
         }
     }
@@ -84,6 +104,8 @@ pub(crate) struct Action {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered_now: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tamper_mode: Option<TamperMode>,
     pub outcome: Outcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -209,7 +231,7 @@ impl Sim {
             ty,
         });
         let (outcome, error) = if deliver_now {
-            let (out, err, ev) = self.decrypt_index(id, false)?;
+            let (out, err, ev) = self.decrypt_index(id, None)?;
             events.extend(ev);
             if out == Outcome::Ok {
                 self.mark_delivered(id);
@@ -234,7 +256,7 @@ impl Sim {
     pub(crate) fn deliver(&mut self, id: u32) -> Result<()> {
         self.require_status(id, "waiting")?;
         let who = self.message(id)?.view.to;
-        let (out, err, ev) = self.decrypt_index(id, false)?;
+        let (out, err, ev) = self.decrypt_index(id, None)?;
         if out == Outcome::Ok {
             self.mark_delivered(id);
         }
@@ -242,16 +264,30 @@ impl Sim {
         Ok(())
     }
     pub(crate) fn tamper(&mut self, id: u32) -> Result<()> {
+        self.experiment(id, TamperMode::BodyBitFlip)
+    }
+    pub(crate) fn experiment(&mut self, id: u32, mode: TamperMode) -> Result<()> {
         self.require_status(id, "waiting")?;
+        if matches!(mode, TamperMode::NoSession | TamperMode::UntrustedIdentity)
+            && self.message(id)?.ty != CiphertextMessageType::Whisper
+        {
+            return Err(anyhow!(
+                "この実験は通常メッセージ用です。Aliceの最初のメッセージを届け、Bobから返信してから、通常メッセージを待機させてください"
+            ));
+        }
         let who = self.message(id)?.view.to;
-        let (out, err, ev) = self.decrypt_index(id, true)?;
+        let (out, err, ev) = self.decrypt_index(id, Some(mode))?;
         self.push(ActionType::Tamper, who, id, None, None, out, err, ev);
+        self.script
+            .last_mut()
+            .expect("just appended experiment")
+            .tamper_mode = Some(mode);
         Ok(())
     }
     pub(crate) fn replay(&mut self, id: u32) -> Result<()> {
         self.require_status(id, "delivered")?;
         let who = self.message(id)?.view.to;
-        let (out, err, ev) = self.decrypt_index(id, false)?;
+        let (out, err, ev) = self.decrypt_index(id, None)?;
         self.push(ActionType::Replay, who, id, None, None, out, err, ev);
         Ok(())
     }
@@ -282,14 +318,17 @@ impl Sim {
     fn decrypt_index(
         &mut self,
         id: u32,
-        tamper: bool,
+        mode: Option<TamperMode>,
     ) -> Result<(Outcome, Option<String>, Vec<Event>)> {
         let (who, ty, mut bytes) = {
             let stored = self.message(id)?;
             (stored.view.to, stored.ty, stored.bytes.clone())
         };
-        if tamper {
-            tamper_bytes(ty, &mut bytes);
+        match mode {
+            Some(TamperMode::BodyBitFlip) => tamper_bytes(ty, &mut bytes),
+            // Empty input consistently reaches CiphertextMessageTooShort for both formats.
+            Some(TamperMode::Truncate) => bytes.clear(),
+            _ => {}
         }
         libsignal_protocol::viz_trace::start();
         let result = (|| {
@@ -297,7 +336,7 @@ impl Sim {
             let parsed = parse(ty, &bytes);
             libsignal_protocol::viz_trace::stage_finished("parse", "sim::parse", &parsed);
             let msg = parsed?;
-            self.decrypt(who, &msg)
+            self.decrypt(who, &msg, mode)
         })();
         let ev = events(who);
         let saw_mac_rejection = ev.iter().any(|e| e.event.kind == "mac_rejected");
@@ -307,23 +346,34 @@ impl Sim {
         };
         Ok((out, err, ev))
     }
-    fn decrypt(&mut self, who: Who, msg: &CiphertextMessage) -> Result<Vec<u8>> {
-        let mut rng = OsRng.unwrap_err();
+    fn decrypt(
+        &mut self,
+        who: Who,
+        msg: &CiphertextMessage,
+        mode: Option<TamperMode>,
+    ) -> Result<Vec<u8>> {
         let (store, remote, local) = self.party_mut(who);
-        message_decrypt(
-            msg,
-            remote,
-            local,
-            &mut store.session_store,
-            &mut store.identity_store,
-            &mut store.pre_key_store,
-            &store.signed_pre_key_store,
-            &mut store.kyber_pre_key_store,
-            &mut rng,
-        )
-        .now_or_never()
-        .expect("sync")
-        .map_err(Into::into)
+        if matches!(
+            mode,
+            Some(TamperMode::NoSession | TamperMode::UntrustedIdentity)
+        ) {
+            let mut receiver = store.clone();
+            match mode {
+                Some(TamperMode::NoSession) => receiver.session_store = InMemSessionStore::new(),
+                Some(TamperMode::UntrustedIdentity) => {
+                    let other_identity = IdentityKeyPair::generate(&mut OsRng.unwrap_err());
+                    receiver
+                        .identity_store
+                        .save_identity(remote, other_identity.identity_key())
+                        .now_or_never()
+                        .expect("sync")?;
+                }
+                _ => unreachable!("receiver-condition experiment"),
+            }
+            decrypt_with_store(&mut receiver, remote, local, msg)
+        } else {
+            decrypt_with_store(store, remote, local, msg)
+        }
     }
     fn party_mut(
         &mut self,
@@ -378,12 +428,37 @@ impl Sim {
             message_id,
             text,
             delivered_now,
+            tamper_mode: None,
             expect: outcome.clone().into(),
             outcome,
             error,
             events,
         });
     }
+}
+
+/// Both normal delivery and experiments run the unchanged public decryption API.
+fn decrypt_with_store(
+    store: &mut InMemSignalProtocolStore,
+    remote: &ProtocolAddress,
+    local: &ProtocolAddress,
+    msg: &CiphertextMessage,
+) -> Result<Vec<u8>> {
+    let mut rng = OsRng.unwrap_err();
+    message_decrypt(
+        msg,
+        remote,
+        local,
+        &mut store.session_store,
+        &mut store.identity_store,
+        &mut store.pre_key_store,
+        &store.signed_pre_key_store,
+        &mut store.kyber_pre_key_store,
+        &mut rng,
+    )
+    .now_or_never()
+    .expect("sync")
+    .map_err(Into::into)
 }
 
 fn store(rng: &mut (impl Rng + CryptoRng)) -> Result<InMemSignalProtocolStore> {
@@ -471,6 +546,9 @@ fn parse(ty: CiphertextMessageType, bytes: &[u8]) -> Result<CiphertextMessage> {
 fn classify(e: &anyhow::Error, saw_mac_rejection: bool) -> Outcome {
     match e.downcast_ref::<SignalProtocolError>() {
         Some(SignalProtocolError::DuplicatedMessage(..)) => Outcome::Duplicate,
+        Some(SignalProtocolError::CiphertextMessageTooShort(..)) => Outcome::TooShort,
+        Some(SignalProtocolError::SessionNotFound(..)) => Outcome::NoSession,
+        Some(SignalProtocolError::UntrustedIdentity(..)) => Outcome::UntrustedIdentity,
         Some(SignalProtocolError::InvalidMessage(..)) if saw_mac_rejection => Outcome::BadMac,
         _ => Outcome::Error,
     }
@@ -611,7 +689,7 @@ mod tests {
         s.messages[0].bytes.clear();
         s.deliver(1)?;
         let last = s.script.last().unwrap();
-        assert_eq!(last.outcome, Outcome::Error);
+        assert_eq!(last.outcome, Outcome::TooShort);
         assert!(
             last.events
                 .iter()
@@ -651,6 +729,143 @@ mod tests {
                 .any(|e| e.event.kind == "skipped_key_used")
         );
         assert_eq!(s.messages[1].view.delivered_order, Some(3));
+        Ok(())
+    }
+
+    fn assert_stage(action: &Action, stage: &str, status: &str) {
+        assert!(
+            action
+                .events
+                .iter()
+                .any(|e| { e.event.stage == Some(stage) && e.event.status == Some(status) }),
+            "missing {stage}: {status}"
+        );
+    }
+
+    #[test]
+    fn experiments_fail_at_real_stages_and_preserve_original_receiver() -> Result<()> {
+        for (mode, expected, failure_stage, not_reached) in [
+            (TamperMode::Truncate, Outcome::TooShort, "parse", "receive"),
+            (
+                TamperMode::NoSession,
+                Outcome::NoSession,
+                "session_load",
+                "key_prepare",
+            ),
+            (
+                TamperMode::UntrustedIdentity,
+                Outcome::UntrustedIdentity,
+                "identity_trust",
+                "identity_save",
+            ),
+        ] {
+            let mut s = Sim::new()?;
+            s.send(Who::Alice, "first".into(), true)?;
+            s.send(Who::Bob, "reply".into(), true)?;
+            s.send(Who::Alice, "original".into(), false)?;
+            assert_eq!(s.messages[2].ty, CiphertextMessageType::Whisper);
+            let before_session = s
+                .bob
+                .load_session(&s.alice_addr)
+                .now_or_never()
+                .expect("sync")?
+                .unwrap()
+                .serialize()?;
+            let before_identity = s
+                .bob
+                .get_identity(&s.alice_addr)
+                .now_or_never()
+                .expect("sync")?;
+            let before_bytes = s.messages[2].bytes.clone();
+            let before_delivered = s.delivered;
+
+            s.experiment(3, mode)?;
+            let action = s.script.last().unwrap();
+            assert_eq!(action.outcome, expected);
+            assert_eq!(action.tamper_mode, Some(mode));
+            assert_eq!(action.expect, expected.into());
+            assert_stage(action, failure_stage, "error");
+            assert!(
+                !action
+                    .events
+                    .iter()
+                    .any(|e| e.event.stage == Some(not_reached))
+            );
+            assert!(
+                !action
+                    .events
+                    .iter()
+                    .any(|e| e.event.stage == Some("session_save"))
+            );
+            if mode != TamperMode::Truncate {
+                assert_stage(action, "parse", "ok");
+                assert_stage(action, "receive", "error");
+            }
+            if mode == TamperMode::UntrustedIdentity {
+                for stage in [
+                    "session_load",
+                    "authentication",
+                    "plaintext",
+                    "session_candidates",
+                ] {
+                    assert_stage(action, stage, "ok");
+                }
+                assert!(action.error.as_ref().is_some_and(|error| !error.is_empty()));
+            }
+            assert_eq!(
+                before_session,
+                s.bob
+                    .load_session(&s.alice_addr)
+                    .now_or_never()
+                    .expect("sync")?
+                    .unwrap()
+                    .serialize()?
+            );
+            assert_eq!(
+                before_identity,
+                s.bob
+                    .get_identity(&s.alice_addr)
+                    .now_or_never()
+                    .expect("sync")?
+            );
+            assert_eq!(before_bytes, s.messages[2].bytes);
+            assert_eq!(s.messages[2].view.status, "waiting");
+            assert_eq!(s.delivered, before_delivered);
+            s.deliver(3)?;
+            assert_eq!(s.script.last().unwrap().outcome, Outcome::Ok);
+            assert_stage(s.script.last().unwrap(), "session_save", "ok");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn prekey_supports_truncation_but_rejects_normal_only_conditions() -> Result<()> {
+        let mut s = Sim::new()?;
+        s.send(Who::Alice, "first".into(), false)?;
+        let count = s.script.len();
+        for mode in [TamperMode::NoSession, TamperMode::UntrustedIdentity] {
+            assert!(s.experiment(1, mode).is_err());
+            assert_eq!(s.script.len(), count);
+        }
+        s.experiment(1, TamperMode::Truncate)?;
+        assert_eq!(s.script.last().unwrap().outcome, Outcome::TooShort);
+        assert_stage(s.script.last().unwrap(), "parse", "error");
+        s.deliver(1)?;
+        assert_eq!(s.script.last().unwrap().outcome, Outcome::Ok);
+        Ok(())
+    }
+
+    #[test]
+    fn receiver_condition_experiments_work_in_reverse_direction() -> Result<()> {
+        let mut s = Sim::new()?;
+        s.send(Who::Alice, "first".into(), true)?;
+        s.send(Who::Bob, "reply".into(), false)?;
+        s.experiment(2, TamperMode::NoSession)?;
+        assert_eq!(s.script.last().unwrap().outcome, Outcome::NoSession);
+        s.experiment(2, TamperMode::UntrustedIdentity)?;
+        assert_eq!(s.script.last().unwrap().outcome, Outcome::UntrustedIdentity);
+        s.deliver(2)?;
+        assert_eq!(s.script.last().unwrap().outcome, Outcome::Ok);
         Ok(())
     }
     #[test]

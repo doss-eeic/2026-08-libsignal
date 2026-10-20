@@ -289,7 +289,14 @@ let GEN = null;         // 書き出し済みのテスト {name, path, code, sta
 let RUNNING = false;
 let TESTS = [];
 let runTimer = null;
-const OUT_JA = { ok: "読めた", duplicate: "重複", bad_mac: "MAC不一致", error: "エラー" };
+const OUT_JA = { ok: "読めた", duplicate: "重複", bad_mac: "MAC不一致", too_short: "短すぎるメッセージ", no_session: "セッションなし", untrusted_identity: "相手の鍵を信頼できない", error: "エラー" };
+const EXPERIMENTS = [
+  { mode: "body_bit_flip", label: "1ビット改ざん" },
+  { mode: "truncate", label: "短すぎる" },
+  { mode: "no_session", label: "セッションなし", receiver: true },
+  { mode: "untrusted_identity", label: "相手の鍵が違う", receiver: true }
+];
+const EXPERIMENT_MODE = new Map();
 const NAME_RE = /^[a-z][a-z0-9_]{0,39}$/;
 const OTHER = { alice: "bob", bob: "alice" };
 const nm = (id) => CHARS[id].name;
@@ -355,11 +362,21 @@ async function runLive(fn) {
 
 /* ---- 文章 ---- */
 function msgById(id) { return ST.messages.find((m) => m.id === id); }
+function experimentMode(a) { return a.tamper_mode || "body_bit_flip"; }
+function receiverExperiment(a) { return a?.type === "tamper" && ["no_session", "untrusted_identity"].includes(experimentMode(a)); }
+function experimentDescription(a) {
+  const id = "#" + a.message_id;
+  switch (experimentMode(a)) {
+    case "truncate": return "Mallory が " + id + " のコピーを0バイトに短くして届けた";
+    case "no_session": return nm(a.who) + " がセッションなしで " + id + " の受信を試した";
+    case "untrusted_identity": return nm(a.who) + " が相手の鍵を別の鍵にして " + id + " の受信を試した";
+    default: return "Mallory が " + id + " の本文の1ビットを書き換えて届けた";
+  }
+}
 function describe(a) {
-  const m = msgById(a.message_id);
   if (a.type === "send") return nm(a.who) + " が『" + a.text + "』を送信して" + (a.delivered_now ? "届けた" : "待機中にした");
   if (a.type === "deliver") return nm(a.who) + " に #" + a.message_id + " を届けた";
-  if (a.type === "tamper") return "Mallory が #" + a.message_id + " を書き換えて届けた";
+  if (a.type === "tamper") return experimentDescription(a);
   return "Mallory が #" + a.message_id + " を再送した";
 }
 function hasDelivery(a) { return a.type !== "send" || a.delivered_now; }
@@ -377,9 +394,14 @@ function captionOf(a) {
   const q = m ? "『" + m.text + "』" : "";
   const to = a.type === "send" ? nm(OTHER[a.who]) : nm(a.who);
   if (a.type === "tamper") {
-    return a.outcome === "bad_mac"
-      ? ["Mallory が #" + a.message_id + " を書き換えて届けたが、MAC不一致で弾かれた", "MAC は暗号文から計算した改ざん検知の印です。1バイト変わると合わなくなり、" + to + " は開く前に捨てます。元のメッセージは待機中のままです。"]
-      : ["Mallory が #" + a.message_id + " を書き換えて届けた（結果：" + OUT_JA[a.outcome] + "）", "libsignal の実際の結果です。期待と違うときは、下の「テストを作る」で確かめられます。"];
+    const explanation = {
+      body_bit_flip: "MAC はメッセージの改ざんを検知する印です。本文の1ビットだけを変えて、認証の結果を観察します。",
+      truncate: "メッセージのコピーを0バイトにして、復号に入る前の形式の読み取りを観察します。",
+      no_session: "暗号文は変えず、相手とのセッションがない受信側で試します。",
+      untrusted_identity: "暗号文は変えず、受信側が覚えている相手の身元の鍵を別の鍵にして、信頼確認を観察します。"
+    }[experimentMode(a)] || "libsignal の実際の結果です。";
+    return [experimentDescription(a) + "（結果：" + (OUT_JA[a.outcome] || a.outcome) + "）",
+      explanation + " 元のメッセージは待機中のままです。"];
   }
   if (a.type === "replay") {
     return a.outcome === "duplicate"
@@ -419,6 +441,15 @@ function outChip(to, outcome, verb) {
   if (outcome === "ok") return '<span class="chip ok">&#10003; ' + nm(to) + " 読めた</span>";
   return '<span class="chip bad">' + nm(to) + " " + (verb || "弾いた") + "：" + esc(OUT_JA[outcome] || outcome) + "</span>";
 }
+function experimentControls(m) {
+  const chosen = EXPERIMENTS.find((experiment) => experiment.mode === EXPERIMENT_MODE.get(m.id));
+  const mode = chosen && (!chosen.receiver || m.kind === "whisper") ? chosen.mode : "body_bit_flip";
+  const disabled = LBUSY ? " disabled" : "";
+  return '<span class="experiment-controls"><select id="experiment-' + m.id + '" data-experiment-id="' + m.id + '" aria-label="メッセージ' + m.id + 'の実験の種類"' + disabled + '>' +
+    EXPERIMENTS.map((experiment) => '<option value="' + experiment.mode + '"' + (mode === experiment.mode ? ' selected' : '') + (experiment.receiver && m.kind !== "whisper" ? ' disabled' : '') + '>' + experiment.label + '</option>').join("") + '</select>' +
+    '<button type="button" class="abtn" id="flip-' + m.id + '" data-act="tamper" data-id="' + m.id + '"' + disabled + '>実験</button></span>' +
+    (m.kind !== "whisper" ? '<span class="experiment-hint">後の2種類は、Bobの返信後の通常メッセージ用です。</span>' : '');
+}
 function renderLiveChat() {
   const log = $("chat-log");
   const last = ST.last;
@@ -448,14 +479,15 @@ function renderLiveChat() {
         '<div class="chips">' + chips + "</div>" +
         '<div class="acts">' +
         (m.status === "waiting"
-          ? '<button type="button" class="abtn" id="deliver-' + m.id + '" data-act="deliver" data-id="' + m.id + '">届ける</button>' +
-            '<button type="button" class="abtn mal" id="flip-' + m.id + '" data-act="tamper" data-id="' + m.id + '">Mallory：1バイト書き換えて届ける</button>'
-          : '<button type="button" class="abtn mal" id="replay-' + m.id + '" data-act="replay" data-id="' + m.id + '">Mallory：もう一度送る</button>') +
+          ? '<button type="button" class="abtn" id="deliver-' + m.id + '" data-act="deliver" data-id="' + m.id + '"' + (LBUSY ? ' disabled' : '') + '>届ける</button>' + experimentControls(m)
+          : '<button type="button" class="abtn mal" id="replay-' + m.id + '" data-act="replay" data-id="' + m.id + '"' + (LBUSY ? ' disabled' : '') + '>Mallory：もう一度送る</button>') +
         "</div></div></div>";
     } else {
-      const text = a.type === "tamper" ? "#" + a.message_id + " の暗号文を1バイト書き換えた" : "#" + a.message_id + " をもう一度送った";
-      h += '<div class="chat-item mal' + (isLast ? " cur" : "") + '" data-cur="' + (isLast ? 1 : 0) + '">' + portraitHtml("mallory", "p32") +
-        '<div class="chat-main"><div class="chat-name"><span class="dot">Mallory</span><span class="tag bad">割り込み</span></div>' +
+      const condition = receiverExperiment(a);
+      const actor = condition ? a.who : "mallory";
+      const text = a.type === "tamper" ? experimentDescription(a) : "#" + a.message_id + " をもう一度送った";
+      h += '<div class="chat-item' + (condition ? ' experiment' : ' mal') + (isLast ? " cur" : "") + '" data-cur="' + (isLast ? 1 : 0) + '">' + portraitHtml(actor, "p32") +
+        '<div class="chat-main"><div class="chat-name"><span class="dot">' + nm(actor) + '</span><span class="tag' + (condition ? '' : ' bad') + '">' + (condition ? '受信条件の実験' : '割り込み') + '</span></div>' +
         '<div class="bubble">' + esc(text) + "</div>" +
         '<div class="chips">' + outChip(m ? m.to : OTHER[a.who], a.outcome) + "</div></div></div>";
     }
@@ -498,6 +530,7 @@ function renderLiveStage() {
   const bad = !!last && last.outcome !== "ok";
   const notes = {};
   if (to && bad) notes[to] = "弾かれた（" + (OUT_JA[last.outcome] || last.outcome) + "）。失敗した段階は受信の診断で確認できます";
+  if (to && receiverExperiment(last)) notes[to] = "受信条件を変えたコピーでの実験（" + (OUT_JA[last.outcome] || last.outcome) + "）。この保管庫は元の状態です。";
   renderStage(SCENES.live, {
     state: {
       alice: boxView(ST.alice, PREV && PREV.alice), bob: boxView(ST.bob, PREV && PREV.bob), mallory: []
@@ -517,7 +550,7 @@ const LT = {
   hasDelivery: (a) => hasDelivery(a),
   mismatch: (a) => mismatch(a),
   out: OUT_JA,
-  options: [["ok", "読める（ok）"], ["duplicate", "重複で弾かれる（duplicate）"], ["bad_mac", "MAC不一致で弾かれる（bad_mac）"], ["any_error", "何かのエラー（any_error）"]],
+  options: [["ok", "読める（ok）"], ["duplicate", "重複で弾かれる（duplicate）"], ["bad_mac", "MAC不一致で弾かれる（bad_mac）"], ["too_short", "短すぎるメッセージ（too_short）"], ["no_session", "セッションなし（no_session）"], ["untrusted_identity", "相手の鍵を信頼できない（untrusted_identity）"], ["any_error", "何かのエラー（any_error）"]],
   gen: () => GEN,
   setGen: (g) => { GEN = g; },
   setState: (n, k) => setState(n, k)
@@ -595,10 +628,18 @@ function renderLive() {
   $("btn-reset").disabled = LBUSY || LOAD !== "ready";
   if (down) return;
   const ready = LOAD === "ready" && !!ST;
+  const bobReady = ready && ST.bob.length > 0;
+  if (ready && !bobReady && SENDER === "bob") SENDER = "alice";
   $("live-msg").textContent = LMSG;
   $("live-msg").hidden = !LMSG;
   $("composer").classList.toggle("busy", LBUSY || !ready);
   ["sender-alice", "sender-bob", "deliver-now", "live-text"].forEach((id) => { $(id).disabled = LBUSY || !ready; });
+  $("sender-bob").disabled = LBUSY || !bobReady;
+  $("send-guidance").textContent = !ready ? "" : !bobReady
+    ? (ST.messages.some((message) => message.from === "alice" && message.status === "waiting")
+      ? 'Aliceのメッセージの「届ける」を押すと、Bobも送れます。'
+      : "最初はAliceから送ってください。Bobは受信後に送れます。")
+    : '「すぐ届ける」をオフにすると、待機中のメッセージで実験できます。';
   ["alice", "bob"].forEach((id) => {
     $("sender-" + id).setAttribute("aria-checked", SENDER === id ? "true" : "false");
     $("sender-" + id).classList.toggle("on", SENDER === id);
@@ -622,14 +663,14 @@ function renderLive() {
   const evs = ST.last ? ST.last.events.filter((event) => event.kind !== "decrypt_stage") : [];
   $("happen-list").innerHTML = evs.length
     ? evs.map((e) => "<li>" + esc(evText(e, "live")) + '<span class="ev-tag">' + esc(e.kind) + "</span></li>").join("")
-    : '<li class="meta">まだ出来事はありません</li>';
+    : '<li class="meta">' + (ST.last ? "鍵の更新などの出来事は記録されていません。受信の進行は上の診断で確認できます。" : "まだ出来事はありません") + '</li>';
   $("json-pre").textContent = ST.last ? JSON.stringify(ST.last, null, 2) : "（まだ操作がありません）";
   renderTestPanel();
 }
 
 function initLive() {
   $("sender-alice").addEventListener("click", () => { SENDER = "alice"; renderLive(); });
-  $("sender-bob").addEventListener("click", () => { SENDER = "bob"; renderLive(); });
+  $("sender-bob").addEventListener("click", () => { if (ST?.bob?.length) { SENDER = "bob"; renderLive(); } });
   $("deliver-now").addEventListener("change", (e) => { DELIVER_NOW = e.target.checked; });
   $("live-text").addEventListener("input", () => { $("btn-send").disabled = LOAD !== "ready" || LBUSY || $("live-text").value.trim() === ""; });
   const send = () => {
@@ -648,13 +689,21 @@ function initLive() {
   $("btn-reset").addEventListener("click", () => runLive(async () => {
     const st = await api("POST", "/api/reset");
     ST = st; PREV = null; GEN = null;
+    SENDER = "alice";
+    EXPERIMENT_MODE.clear();
   }));
   $("btn-retry").addEventListener("click", () => (sceneId === "glive" ? enterGroup() : enterLive()));
+  $("chat-log").addEventListener("change", (e) => {
+    const select = e.target.closest("select[data-experiment-id]");
+    if (select && sceneId === "live") EXPERIMENT_MODE.set(Number(select.dataset.experimentId), select.value);
+  });
   $("chat-log").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-act]");
     if (!b || sceneId !== "live") return;
     const act = b.dataset.act, id = Number(b.dataset.id);
-    runLive(async () => { setState(await api("POST", "/api/" + act, { message_id: id })); });
+    const payload = { message_id: id };
+    if (act === "tamper") payload.mode = $("experiment-" + id).value;
+    runLive(async () => { setState(await api("POST", "/api/" + act, payload)); });
   });
   $("script-body").addEventListener("change", (e) => {
     const s = e.target.closest("select[data-i]");

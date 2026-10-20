@@ -187,6 +187,12 @@ header p { margin: 4px 0 0; color: var(--muted); font-size: 13.5px; }
 .send-row input:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
 .send-row .btn { min-width: 72px; padding: 8px 16px; }
 .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.experiment-controls { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.experiment-controls select { min-width: 0; max-width: 100%; font: inherit; font-size: 13px; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 4px; min-height: 32px; }
+.experiment-controls select:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.experiment-hint { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+.experiment-controls select:disabled { opacity: 0.5; }
+.seg button:disabled { opacity: 0.4; cursor: not-allowed; }
 .abtn { appearance: none; cursor: pointer; background: var(--surface-2); border: 1px solid var(--fg); border-radius: 6px; padding: 2px 10px; min-height: 32px; font-size: 13px; }
 .abtn.mal { border-color: var(--bad); color: var(--bad); background: transparent; }
 .abtn:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
