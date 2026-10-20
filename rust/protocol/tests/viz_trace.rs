@@ -61,6 +61,24 @@ fn group_creation_distribution_and_normal_message() -> TestResult {
                 .iter()
                 .any(|e| e.kind == "signature_checked" && e.ok == Some(true))
         );
+        let completed: Vec<_> = received
+            .iter()
+            .filter(|e| e.kind == "decrypt_stage" && e.status != Some("started"))
+            .map(|e| (e.stage.unwrap(), e.status.unwrap()))
+            .collect();
+        assert_eq!(
+            completed,
+            [
+                ("parse", "ok"),
+                ("sender_key_load", "ok"),
+                ("sender_key_state", "ok"),
+                ("signature", "ok"),
+                ("key_prepare", "ok"),
+                ("plaintext", "ok"),
+                ("sender_key_save", "ok"),
+                ("receive", "ok"),
+            ]
+        );
         assert_eq!(
             sent.iter()
                 .find(|e| e.kind == "sender_message_key")
@@ -101,11 +119,20 @@ fn group_skipped_keys_duplicate_and_signature_failure() -> TestResult {
             group_decrypt(&corrupt, &mut b, &sender).await,
             Err(SignalProtocolError::SignatureValidationFailed)
         ));
+        let rejected = take();
         assert!(
-            take()
+            rejected
                 .iter()
                 .any(|e| e.kind == "signature_checked" && e.ok == Some(false))
         );
+        assert!(has_stage(&rejected, "signature", "error"));
+        assert!(has_stage(&rejected, "receive", "error"));
+        assert!(!rejected.iter().any(|e| {
+            matches!(
+                e.stage,
+                Some("key_prepare" | "plaintext" | "sender_key_save")
+            )
+        }));
         assert_eq!(
             before,
             b.load_sender_key(&sender, id).await?.unwrap().serialize()?
@@ -146,10 +173,19 @@ fn group_skipped_keys_duplicate_and_signature_failure() -> TestResult {
             group_decrypt(messages[0].serialized(), &mut b, &sender).await,
             Err(SignalProtocolError::DuplicatedMessage(..))
         ));
+        let duplicate = take();
         assert!(
-            take()
+            duplicate
                 .iter()
                 .any(|e| e.kind == "duplicate_rejected" && e.index == Some(0))
+        );
+        assert!(has_stage(&duplicate, "signature", "ok"));
+        assert!(has_stage(&duplicate, "key_prepare", "error"));
+        assert!(has_stage(&duplicate, "receive", "error"));
+        assert!(
+            !duplicate
+                .iter()
+                .any(|e| matches!(e.stage, Some("plaintext" | "sender_key_save")))
         );
         Ok(())
     }
@@ -172,7 +208,15 @@ fn group_late_joiner_cannot_read_older_message() -> TestResult {
             group_decrypt(old.serialized(), &mut c, &sender).await,
             Err(SignalProtocolError::NoSenderKeyState { .. })
         ));
-        assert!(take().iter().any(|e| e.kind == "no_sender_key"));
+        let missing = take();
+        assert!(missing.iter().any(|e| e.kind == "no_sender_key"));
+        assert!(has_stage(&missing, "parse", "ok"));
+        assert!(has_stage(&missing, "sender_key_load", "error"));
+        assert!(has_stage(&missing, "receive", "error"));
+        assert!(!missing.iter().any(|e| matches!(
+            e.stage,
+            Some("signature" | "key_prepare" | "plaintext" | "sender_key_save")
+        )));
         let current = create_sender_key_distribution_message(&sender, id, &mut a, &mut rng).await?;
         process_sender_key_distribution_message(&sender, &current, &mut c).await?;
         start();
@@ -181,6 +225,29 @@ fn group_late_joiner_cannot_read_older_message() -> TestResult {
             Err(SignalProtocolError::DuplicatedMessage(..))
         ));
         assert!(take().iter().any(|e| e.kind == "duplicate_rejected"));
+        Ok(())
+    }
+    .now_or_never()
+    .expect("sync")
+}
+
+#[test]
+fn malformed_group_message_is_rejected_before_loading_keys() -> TestResult {
+    async {
+        let sender = ProtocolAddress::new("alice".into(), DeviceId::new(1).unwrap());
+        let mut receiver = test_in_memory_protocol_store()?;
+        start();
+        assert!(matches!(
+            group_decrypt(&[], &mut receiver, &sender).await,
+            Err(SignalProtocolError::CiphertextMessageTooShort(..))
+        ));
+        let rejected = take();
+        assert!(has_stage(&rejected, "parse", "error"));
+        assert!(has_stage(&rejected, "receive", "error"));
+        assert!(!rejected.iter().any(|e| matches!(
+            e.stage,
+            Some("sender_key_load" | "signature" | "key_prepare" | "plaintext" | "sender_key_save")
+        )));
         Ok(())
     }
     .now_or_never()

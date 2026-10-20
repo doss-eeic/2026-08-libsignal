@@ -205,7 +205,7 @@ function render() {
   $("gctl").hidden = sceneId !== "glive";
   $("live-note").hidden = !isLive;
   $("controls").hidden = isLive;
-  $("receive-diagnosis").hidden = sceneId !== "live";
+  $("receive-diagnosis").hidden = !isLive;
   $("stage").classList.toggle("g", sceneId === "glive");
   if (isLive) {
     $("live-error").hidden = true;
@@ -565,6 +565,24 @@ function renderTestPanel() {
     : '<li class="meta">まだありません</li>';
 }
 
+const DIAG_EXPANDED = { live: false, group: false };
+function renderReceiveDiagnosis(action, message, mode) {
+  const panel = $("receive-diagnosis");
+  const previous = panel.querySelector(".diag-more");
+  if (previous && panel.dataset.mode) DIAG_EXPANDED[panel.dataset.mode] = previous.open;
+  const receiver = mode === "group" ? action?.who : message?.to;
+  const html = diagnosisHtml(action, message, {
+    mode,
+    senderLabel: message?.from ? nm(message.from) : "",
+    receiverLabel: receiver ? nm(receiver) : ""
+  });
+  panel.dataset.mode = mode;
+  panel.innerHTML = html;
+  panel.hidden = !html;
+  const details = panel.querySelector(".diag-more");
+  if (details) details.open = DIAG_EXPANDED[mode];
+}
+
 function renderLive() {
   const down = LOAD === "down";
   $("live-error").hidden = !down;
@@ -597,9 +615,7 @@ function renderLive() {
   }
   renderLiveChat();
   renderLiveStage();
-  const diagnosis = diagnosisHtml(ST.last, ST.last ? msgById(ST.last.message_id) : null);
-  $("receive-diagnosis").innerHTML = diagnosis;
-  $("receive-diagnosis").hidden = !diagnosis;
+  renderReceiveDiagnosis(ST.last, ST.last ? msgById(ST.last.message_id) : null, "live");
   const cap = captionOf(ST.last);
   $("cap-title").textContent = cap[0];
   $("cap-text").textContent = cap[1];
@@ -950,10 +966,11 @@ function renderGroup() {
   renderGroupChat();
   renderGroupStage();
   const last = GST.last;
+  renderReceiveDiagnosis(last, last ? gMsg(last.message_id) : null, "group");
   let lis = "";
   if (!last) lis = '<li class="meta">まだ出来事はありません</li>';
   else if (last.type === "join") lis = "<li>" + esc(nm(last.who) + " がグループに入った。libsignal の中は何も変わらない。" + nm(last.who) + " が読めるのは、このあと配られる Sender Key から先だけ") + "</li>";
-  else lis = (last.events || []).map((e) => "<li>" + esc(gEvText(e)) + '<span class="ev-tag">' + esc(e.kind) + "</span></li>").join("") ||
+  else lis = (last.events || []).filter((e) => e.kind !== "decrypt_stage").map((e) => "<li>" + esc(gEvText(e)) + '<span class="ev-tag">' + esc(e.kind) + "</span></li>").join("") ||
     '<li class="meta">このステップで libsignal の出来事はありません</li>';
   $("happen-list").innerHTML = lis;
   $("json-pre").textContent = last ? JSON.stringify(last, null, 2) : "（まだ操作がありません）";

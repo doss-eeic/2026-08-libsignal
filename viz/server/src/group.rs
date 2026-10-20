@@ -92,6 +92,14 @@ pub(crate) struct Event {
     fp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -316,6 +324,10 @@ impl Sim {
                 index: Some(distribution.iteration()?),
                 fp: Some(viz_trace::fp(distribution.chain_key()?)),
                 ok: None,
+                stage: None,
+                status: None,
+                source: None,
+                detail: None,
             });
         }
         let message = recorded(
@@ -460,6 +472,10 @@ fn recorded<T>(
         index: e.index,
         fp: e.fp,
         ok: e.ok,
+        stage: e.stage,
+        status: e.status,
+        source: e.source,
+        detail: e.detail,
     }));
     result
 }
@@ -595,6 +611,22 @@ mod tests {
         s.script.last().expect("action")
     }
 
+    fn stage<'a>(action: &'a Action, stage: &str, status: &str) -> &'a Event {
+        action
+            .events
+            .iter()
+            .find(|e| {
+                e.kind == "decrypt_stage" && e.stage == Some(stage) && e.status == Some(status)
+            })
+            .unwrap_or_else(|| panic!("missing stage {stage}: {status}"))
+    }
+
+    fn assert_not_reached(action: &Action, stages: &[&str]) {
+        assert!(action.events.iter().all(|e| {
+            e.kind != "decrypt_stage" || !e.stage.is_some_and(|stage| stages.contains(&stage))
+        }));
+    }
+
     #[test]
     fn alice_bob_exchange_with_delivery() -> Result<()> {
         let mut s = Sim::new()?;
@@ -606,6 +638,47 @@ mod tests {
         assert_eq!(s.script[0].action_type, ActionType::Send);
         assert_eq!(s.script[1].action_type, ActionType::Deliver);
         assert_eq!(s.script[0].distributed_to, Some(vec![Member::Bob]));
+        for action in s
+            .script
+            .iter()
+            .filter(|a| a.action_type == ActionType::Deliver)
+        {
+            for name in [
+                "parse",
+                "sender_key_load",
+                "sender_key_state",
+                "signature",
+                "key_prepare",
+                "plaintext",
+                "sender_key_save",
+                "receive",
+            ] {
+                let event = stage(action, name, "ok");
+                assert_eq!(event.who, action.who);
+                assert_ne!(event.sender, action.who);
+                assert!(event.source.is_some());
+                assert!(event.detail.is_none());
+            }
+            let order: Vec<_> = action
+                .events
+                .iter()
+                .filter(|e| e.kind == "decrypt_stage" && e.status == Some("ok"))
+                .filter_map(|e| e.stage)
+                .collect();
+            assert_eq!(
+                order,
+                [
+                    "parse",
+                    "sender_key_load",
+                    "sender_key_state",
+                    "signature",
+                    "key_prepare",
+                    "plaintext",
+                    "sender_key_save",
+                    "receive"
+                ]
+            );
+        }
         let events = &s.script[0].events;
         assert!(
             events
@@ -635,6 +708,16 @@ mod tests {
             .unwrap();
         assert_eq!(chain["to_index"], 1);
         assert!(chain.get("to").is_none());
+        let receive = state["script"][1]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["stage"] == "sender_key_save" && e["status"] == "ok")
+            .unwrap();
+        assert_eq!(receive["kind"], "decrypt_stage");
+        assert_eq!(receive["who"], "bob");
+        assert_eq!(receive["sender"], "alice");
+        assert!(receive["source"].as_str().is_some());
         s.send(Member::Alice, "again".into(), true)?;
         assert_eq!(s.script[4].distributed_to, Some(vec![]));
         Ok(())
@@ -649,6 +732,19 @@ mod tests {
         assert_eq!(s.messages[0].view.deliveries[1].status, "not_addressed");
         s.receive(1, Member::Carol, ActionType::Deliver)?;
         assert_eq!(last(&s).outcome, Outcome::NoSenderKey);
+        stage(last(&s), "parse", "ok");
+        assert!(stage(last(&s), "sender_key_load", "error").detail.is_some());
+        stage(last(&s), "receive", "error");
+        assert_not_reached(
+            last(&s),
+            &[
+                "sender_key_state",
+                "signature",
+                "key_prepare",
+                "plaintext",
+                "sender_key_save",
+            ],
+        );
         s.send(Member::Alice, "new".into(), true)?;
         assert_eq!(s.script[4].distributed_to, Some(vec![Member::Carol]));
         assert!(
@@ -660,6 +756,9 @@ mod tests {
         );
         s.receive(1, Member::Carol, ActionType::Deliver)?;
         assert_eq!(last(&s).outcome, Outcome::Duplicate);
+        stage(last(&s), "signature", "ok");
+        stage(last(&s), "key_prepare", "error");
+        assert_not_reached(last(&s), &["plaintext", "sender_key_save"]);
         assert_eq!(s.messages[0].view.deliveries[1].status, "not_addressed");
         Ok(())
     }
@@ -715,6 +814,12 @@ mod tests {
         assert_eq!(parsed.chain_id(), clean.chain_id());
         s.receive(1, Member::Bob, ActionType::Tamper)?;
         assert_eq!(last(&s).outcome, Outcome::BadSignature);
+        stage(last(&s), "parse", "ok");
+        stage(last(&s), "sender_key_load", "ok");
+        stage(last(&s), "sender_key_state", "ok");
+        assert!(stage(last(&s), "signature", "error").detail.is_some());
+        stage(last(&s), "receive", "error");
+        assert_not_reached(last(&s), &["key_prepare", "plaintext", "sender_key_save"]);
         assert!(
             last(&s)
                 .events
@@ -726,8 +831,15 @@ mod tests {
         assert_eq!(s.messages[0].view.deliveries[0].status, "waiting");
         s.receive(1, Member::Bob, ActionType::Deliver)?;
         assert_eq!(last(&s).outcome, Outcome::Ok);
+        stage(last(&s), "signature", "ok");
+        stage(last(&s), "sender_key_save", "ok");
+        stage(last(&s), "receive", "ok");
         s.receive(1, Member::Bob, ActionType::Replay)?;
         assert_eq!(last(&s).outcome, Outcome::Duplicate);
+        stage(last(&s), "signature", "ok");
+        stage(last(&s), "key_prepare", "error");
+        stage(last(&s), "receive", "error");
+        assert_not_reached(last(&s), &["plaintext", "sender_key_save"]);
         Ok(())
     }
 

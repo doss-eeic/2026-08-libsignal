@@ -84,26 +84,40 @@ body {
   line-height: 1.7;
 }
 .mono { font-family: "JetBrains Mono", monospace; }
-.diagnosis { margin: 16px 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
-.diagnosis h3, .diagnosis h4 { margin: 0 0 8px; }
+/* Keep the path visible; expand only the detailed observation records. */
+.diagnosis { margin: 12px 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
+.diagnosis h3, .diagnosis h4, .diagnosis p { margin: 0; }
+.diagnosis h3 { font-size: 14px; font-weight: 600; }
+.diagnosis h4 { font-size: 12px; }
 .diagnosis ol { list-style: none; padding: 0; margin: 0; }
-.diag-row { padding: 8px 0; border-bottom: 1px solid var(--line); }
-.diag-row > div:first-child { display: flex; justify-content: space-between; gap: 12px; }
-.diag-row strong { white-space: nowrap; }
-.diag-ok strong, .diag-result.diag-ok { color: var(--ok); }
-.diag-error strong, .diag-result.diag-error { color: var(--bad); }
-.diag-skipped, .diag-unknown, .diag-source { color: var(--muted); }
-.diag-detail { margin: 5px 0; padding: 6px 8px; background: var(--bad-soft); border-radius: 4px; overflow-wrap: anywhere; font-size: 13px; }
-.diag-source { font-size: 12px; margin-top: 2px; padding: 0; border: 0; border-radius: 0; background: transparent; }
-.diag-source summary { display: list-item; min-height: 0; }
-.diag-source code { overflow-wrap: anywhere; }
-.diag-candidate { margin: 10px 0 4px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); }
-.diag-candidate h4 { font-size: 13px; }
-.diag-badge { display: inline-block; margin-left: 8px; padding: 0 5px; border-radius: 4px; background: var(--surface); }
-.diag-badge.diag-ok { color: var(--ok); }
-.diag-badge.diag-error { color: var(--bad); }
-.diag-result { font-weight: 700; }
-.diag-final-error pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.diag-heading { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; justify-content: space-between; }
+.diag-result { font-size: 13px; white-space: nowrap; }
+.diag-context { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+.diag-context b { font-weight: 500; color: var(--fg); }
+.diagnosis .diag-stop { margin-top: 4px; font-size: 12px; color: var(--bad); }
+.diagnosis .diag-pipeline { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 116px), 1fr)); gap: 5px; margin-top: 8px; }
+.diag-chip { min-width: 0; border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; line-height: 1.4; background: var(--surface); }
+.diag-chip-name { display: block; font-size: 11.5px; overflow-wrap: anywhere; }
+.diag-number { color: var(--muted); margin-right: 4px; font-variant-numeric: tabular-nums; }
+.diag-chip-state { display: block; padding-left: 12px; font-size: 10.5px; font-weight: 600; }
+.diag-ok .diag-chip-state, .diag-result.diag-ok, .diag-badge.diag-ok, .diag-record.diag-ok strong { color: var(--ok); }
+.diag-error .diag-chip-state, .diag-result.diag-error, .diag-badge.diag-error, .diag-record.diag-error strong { color: var(--bad); }
+.diag-chip.diag-error { background: var(--bad-soft); border-color: var(--bad); }
+.diag-chip.diag-skipped, .diag-chip.diag-unknown, .diag-record.diag-skipped, .diag-record.diag-unknown { color: var(--muted); }
+.diag-chip.diag-skipped { border-style: dashed; }
+.diagnosis .diag-note { margin-top: 5px; color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+/* Override the page's large, global <details> presentation for this compact panel. */
+.diagnosis .diag-more { margin: 6px 0 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.diagnosis .diag-more > summary { display: list-item; min-height: 28px; padding: 3px 0; font-size: 12px; }
+.diag-detail-scroll { max-height: 260px; overflow-y: auto; overscroll-behavior: contain; padding: 0 5px 3px 0; scrollbar-gutter: stable; }
+.diag-detail-scroll:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.diag-record { padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 11.5px; }
+.diag-record > div { display: flex; justify-content: space-between; gap: 10px; }
+.diag-record strong { white-space: nowrap; }
+.diag-record code { display: block; color: var(--muted); overflow-wrap: anywhere; font-size: 10.5px; }
+.diag-detail { margin: 3px 0; padding: 5px 7px; background: var(--bad-soft); border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.diag-trial { margin: 6px 0; padding: 6px 8px; border-left: 2px solid var(--line); }
+.diag-badge { display: inline-block; margin-left: 8px; }
 .dot { font-family: "DotGothic16", sans-serif; font-weight: 400; }
 
 .wrap {

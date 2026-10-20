@@ -4,6 +4,7 @@ libsignal の中で鍵がどう変わるかを、ブラウザで1ステップず
 
 - ①〜③：手作りのサンプルデータを再生する説明用の画面
 - ④：手元で動かした本物の libsignal（`rust/protocol`）に、画面からメッセージを送る
+- ⑤：複数人の Sender Keys 通信で、配布・受信・改ざん・再送を操作する
 - ④の「テストを作る」：画面での操作から Rust のテストを生成し、その場で `cargo test` を実行する
 
 ## 起動（macOS / Linux）
@@ -32,11 +33,12 @@ rust/protocol（本物の libsignal）
 
 - `viz-trace` 機能を付けたときだけ記録が動きます。付けないビルドでは記録のコードは消え、libsignal の動作は変わりません
 - 鍵そのものは画面に出しません。SHA-256 の先頭4バイト（8文字）を「指紋」として出します
-- 記録を入れている場所：`src/double_ratchet.rs`、`src/triple_ratchet.rs`、`src/ratchet/keys.rs`、`src/session.rs`、`src/session_management.rs`（`viz_record!` で検索）
+- 記録を入れている場所：`src/double_ratchet.rs`、`src/triple_ratchet.rs`、`src/ratchet/keys.rs`、`src/session.rs`、`src/session_management.rs`、`src/group_cipher.rs`（出来事は `viz_record!`、段階の結果は `viz_observe!` で検索）
 - 記録するのは古典的な Double Ratchet の鍵だけです。v0.105 の送信は `triple_ratchet.rs` を通るので送信側の記録はそこにありますが、耐量子（SPQR）の鍵は記録しません
 - 記録は「今のスレッド」に貯めます（`viz_trace::start` → libsignal の呼び出し → `viz_trace::take`）。この間に `.await` を挟むと記録が混ざるので、サーバーは各呼び出しを `now_or_never` で同期的に実行しています
 - 「Mallory：1バイト書き換えて届ける」は、届ける途中のコピーだけを書き換えます。元のメッセージは待機中のまま残り、あとで普通に届けられます。MAC が合わない受信では libsignal は鍵の状態を変えません
-- ④の「受信の診断」は、形式の読み取り・セッションの準備・認証・本文の復号・保存の結果を、実際の処理の記録から表示します。初回の `PreKey` と通常の `Whisper` の両方に対応しています
+- ④と⑤の「受信の診断」は、形式の読み取り・鍵の準備・認証・本文の復号・保存の結果を、実際の処理の記録から表示します。④の初回の `PreKey`、通常の `Whisper` と、⑤の `SenderKey` に対応しています
+- 診断は受信全体の結果と段階の一覧をコンパクトに表示します。段階ごとの詳しい説明、内部エラーや記録した関数は、詳細を開いて確認できます
 - 現在の候補が失敗して過去の候補が成功した場合は、それぞれの候補と受信全体の結果を分けます。候補内の鍵更新イベントは作業用の状態で行った試行も含み、保存の成功を意味しません
 - 「未実行」は、その経路で失敗した段階より後にある処理です。記録が不足している場合は「記録なし」と表示し、成功や未実行を推測しません
 - API の詳細は `viz/server/src/main.rs` の各ハンドラを参照
@@ -60,7 +62,7 @@ rust/protocol（本物の libsignal）
 | `no_sender_key` | 送信者の Sender Key がないため弾いた | なし |
 
 受信診断の `status` は `started` / `ok` / `error` です。
-候補内の記録には `candidate`（その操作内で0から数える試行番号）と `candidate_kind`（`current` / `previous`）が付きます。
+④の候補内の記録には `candidate`（その操作内で0から数える試行番号）と `candidate_kind`（`current` / `previous`）が付きます。
 画面には途中の内部エラーと、最後に呼び出し元へ返ったエラーを分けて表示します。
 認証の段階はMACだけでなくアドレス確認も含むため、「認証の検証（MAC・アドレス）」という名前です。
 相手の信頼確認と保存は、通常メッセージとPreKeyで元の処理順が異なり、画面もそれぞれの経路に合わせています。
@@ -72,6 +74,14 @@ Alice と Bob から始め、Carol と Dave が後から参加できます。`/a
 Sender Key の配布メッセージはストア間で直接渡します。実際の Signal が使う1対1の暗号化メッセージによる配送は省略しています。参加だけでは鍵を配布せず、次の送信時に未配布の参加者へ現在の鍵を渡します。配布前の古いメッセージは `no_sender_key`、現在の鍵を受け取った後も古い番号は `duplicate` となり読めません。署名に失敗したコピーは `bad_signature` となり、元のメッセージは後で正常に配達できます。
 
 グループの「テストを作る」も公開 API だけの Rust テストを生成し、既存の `/api/test/run` で実行します。
+
+### ④と⑤の復号処理の違い
+
+④の1対1通信は `message_decrypt` → `message_decrypt_signal` / `message_decrypt_prekey` → `TripleRatchet::decrypt` を通り、MACとアドレスを検証します。⑤のグループ本文は別の入口である `group_decrypt`（`rust/protocol/src/group_cipher.rs`）を通り、送信者が配布した Sender Key の記録を読み出し、電子署名を検証してからメッセージ用の鍵を準備します。⑤も同じ `message_decrypt` を使うわけではありません。
+
+⑤で観察する順序は、`parse`（形式の読み取り）→ `sender_key_load`（Sender Keyの記録の取得）→ `sender_key_state`（該当する鎖の選択）→ `signature`（署名の検証）→ `key_prepare`（メッセージ用の鍵の準備）→ `plaintext`（本文の復号）→ `sender_key_save`（更新後の記録の保存）です。`receive` は呼び出し全体の結果です。これらは既存の処理を `viz_observe!` で囲んで記録しており、暗号方式、検証の判断や返すエラーは変更していません。
+
+各受信者を指定して「届ける」「改ざんして届ける」「再送」を行うと、その受信者の直近の結果を診断に表示します。正常受信は保存まで成功、本文改ざんは署名で失敗し鍵の準備以降は未実行、受信済みメッセージの再送は署名に成功して鍵の準備で失敗します。鍵の未配布の参加者への配達は、記録の取得で失敗し、署名の検証にも進みません。これらを同じ表示で比較できます。
 
 ## テストを作る
 
