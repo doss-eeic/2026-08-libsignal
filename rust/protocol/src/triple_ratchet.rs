@@ -234,13 +234,19 @@ impl TripleRatchet {
                 let chain_key = self
                     .ratchet
                     .ensure_receiver_chain(their_ephemeral, csprng)?;
-                let message_key_gen = self.ratchet.consume_message_key(
+                let message_key_gen = match self.ratchet.consume_message_key(
                     their_ephemeral,
                     chain_key,
                     counter,
                     original_message_type,
                     &sender_address.to_string(),
-                )?;
+                ) {
+                    Ok(message_key_gen) => message_key_gen,
+                    Err(error) => {
+                        eprintln!("鍵の準備: 失敗 ({error})");
+                        return Err(error);
+                    }
+                };
 
                 // SPQR recv — compute key but don't commit state yet
                 let spqr::Recv {
@@ -259,6 +265,7 @@ impl TripleRatchet {
 
                 // Derive final message keys by mixing DR chain key with SPQR key
                 let message_keys = message_key_gen.generate_keys(pqr_key);
+                eprintln!("鍵の準備: 成功");
                 Ok((new_pqr_state, message_keys))
             })()
         )?;
@@ -276,12 +283,14 @@ impl TripleRatchet {
                     message_keys.mac_key(),
                 )?;
                 if !mac_valid {
+                    eprintln!("MAC・アドレスの検証: 失敗");
                     return Err(SignalProtocolError::InvalidMessage(
                         original_message_type,
                         "MAC verification failed".to_owned(),
                     ));
                 }
 
+                eprintln!("MAC・アドレスの検証: 成功");
                 Ok(())
             })()
         )?;
@@ -291,13 +300,14 @@ impl TripleRatchet {
             "plaintext",
             "TripleRatchet::decrypt",
             (|| {
-                let plaintext = match signal_crypto::aes_256_cbc_decrypt(
+                let ptext = match signal_crypto::aes_256_cbc_decrypt(
                     ciphertext.body(),
                     message_keys.cipher_key(),
                     message_keys.iv(),
                 ) {
                     Ok(ptext) => ptext,
                     Err(signal_crypto::DecryptionError::BadKeyOrIv) => {
+                        eprintln!("本文の復号: 失敗");
                         log::warn!(
                             "{current_or_previous_for_logging} session state corrupt for {sender_address}",
                         );
@@ -306,20 +316,21 @@ impl TripleRatchet {
                         ));
                     }
                     Err(signal_crypto::DecryptionError::BadCiphertext(msg)) => {
+                        eprintln!("本文の復号: 失敗");
                         return Err(SignalProtocolError::InvalidMessage(
                             original_message_type,
                             format!("failed to decrypt: {msg}"),
                         ));
                     }
                 };
-
-                Ok(plaintext)
+                Ok(ptext)
             })()
         )?;
 
         // Commit SPQR state only after all verification passed
         self.pqr_state = new_pqr_state;
 
+        eprintln!("本文の復号: 成功");
         Ok(ptext)
     }
 }

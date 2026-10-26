@@ -332,23 +332,29 @@ pub async fn message_decrypt_signal<R: Rng + CryptoRng>(
     identity_store: &mut dyn IdentityKeyStore,
     csprng: &mut R,
 ) -> Result<Vec<u8>> {
+    eprintln!("--- 復号開始 ---"); // 追加した
     let mut session_record = viz_observe!(
         "session_load",
         "message_decrypt_signal",
-        session_store
-            .load_session(remote_address)
-            .await
-            .and_then(|record| {
-                record.ok_or_else(|| {
+        async {
+            session_store
+                .load_session(remote_address)
+                .await?
+                .ok_or_else(|| {
+                    eprintln!("セッション取得: 失敗 (セッションがない)");
+                    eprintln!("受信結果: 失敗");
                     SignalProtocolError::SessionNotFound(SessionNotFound::new(
                         remote_address.clone(),
                         "message_decrypt_signal",
                     ))
                 })
-            })
+        }
+        .await
     )?;
 
-    let ptext = viz_observe!(
+    eprintln!("セッション取得: 成功");
+
+    let ptext = match viz_observe!(
         "session_candidates",
         "message_decrypt_signal",
         try_decrypt_from_record(
@@ -359,7 +365,13 @@ pub async fn message_decrypt_signal<R: Rng + CryptoRng>(
             CiphertextMessageType::Whisper,
             csprng,
         )
-    )?;
+    ) {
+        Ok(ptext) => ptext,
+        Err(error) => {
+            eprintln!("受信結果: 失敗");
+            return Err(error);
+        }
+    };
 
     // Why are we performing this check after decryption instead of before?
     let their_identity_key = session_record
@@ -372,24 +384,28 @@ pub async fn message_decrypt_signal<R: Rng + CryptoRng>(
     viz_observe!(
         "identity_trust",
         "message_decrypt_signal",
-        identity_store
-            .is_trusted_identity(remote_address, &their_identity_key, Direction::Receiving)
-            .await
-            .and_then(|trusted| {
-                if trusted {
-                    Ok(())
-                } else {
-                    log::warn!(
-                        "Identity key {} is not trusted for remote address {}",
-                        hex::encode(their_identity_key.public_key().public_key_bytes()),
-                        remote_address,
-                    );
-                    Err(SignalProtocolError::UntrustedIdentity(
-                        remote_address.clone(),
-                    ))
-                }
-            })
+        async {
+            if !identity_store
+                .is_trusted_identity(remote_address, &their_identity_key, Direction::Receiving)
+                .await?
+            {
+                log::warn!(
+                    "Identity key {} is not trusted for remote address {}",
+                    hex::encode(their_identity_key.public_key().public_key_bytes()),
+                    remote_address,
+                );
+                eprintln!("相手の信頼確認: 失敗");
+                eprintln!("受信結果: 失敗");
+                return Err(SignalProtocolError::UntrustedIdentity(
+                    remote_address.clone(),
+                ));
+            }
+            Ok(())
+        }
+        .await
     )?;
+
+    eprintln!("相手の信頼確認: 成功");
 
     viz_observe!(
         "identity_save",
@@ -407,6 +423,8 @@ pub async fn message_decrypt_signal<R: Rng + CryptoRng>(
             .await
     )?;
 
+    eprintln!("状態の保存: 成功");
+    eprintln!("受信結果: 成功");
     Ok(ptext)
 }
 
